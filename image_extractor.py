@@ -1,4 +1,5 @@
 """Extract thumbnail URL for a feed entry, with og:image fallback."""
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -14,22 +15,20 @@ logger = logging.getLogger(__name__)
 _OG_TIMEOUT = aiohttp.ClientTimeout(total=5)
 
 
-def _is_safe_http_url(url: str) -> bool:
-    """Reject non-http(s) schemes and hosts that resolve to private/loopback/
-    link-local IPs (basic SSRF guard). Best-effort: DNS can be rebound."""
+def _scheme_and_host(url: str) -> tuple[str, str] | None:
     try:
         parsed = urlparse(url)
     except ValueError:
-        return False
+        return None
     if parsed.scheme not in ("http", "https"):
-        return False
+        return None
     host = parsed.hostname
     if not host:
-        return False
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return False
+        return None
+    return parsed.scheme, host
+
+
+def _ips_are_public(infos) -> bool:
     for info in infos:
         addr = info[4][0]
         try:
@@ -39,6 +38,22 @@ def _is_safe_http_url(url: str) -> bool:
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
             return False
     return True
+
+
+async def _is_safe_http_url(url: str) -> bool:
+    """Async SSRF guard. Rejects non-http(s) and hosts that resolve to private,
+    loopback, link-local, reserved, or multicast IPs. Uses the event loop's
+    getaddrinfo so we don't block other coroutines during DNS."""
+    parts = _scheme_and_host(url)
+    if parts is None:
+        return False
+    _, host = parts
+    try:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, None)
+    except (socket.gaierror, OSError):
+        return False
+    return _ips_are_public(infos)
 
 
 def _http_scheme_ok(url: str | None) -> bool:
@@ -79,7 +94,7 @@ async def from_og(session: aiohttp.ClientSession, page_url: str, cache: dict) ->
     cache_key = page_url
     if cache_key in cache:
         return cache[cache_key]
-    if not _is_safe_http_url(page_url):
+    if not await _is_safe_http_url(page_url):
         cache[cache_key] = None
         return None
     try:
@@ -93,7 +108,7 @@ async def from_og(session: aiohttp.ClientSession, page_url: str, cache: dict) ->
                     cache[cache_key] = None
                     return None
                 next_url = urljoin(page_url, loc)
-                if not _is_safe_http_url(next_url) or next_url == page_url:
+                if next_url == page_url or not await _is_safe_http_url(next_url):
                     cache[cache_key] = None
                     return None
                 async with session.get(next_url, timeout=_OG_TIMEOUT, allow_redirects=False) as r2:

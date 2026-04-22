@@ -30,7 +30,16 @@ _WORD_RE = re.compile(r"\w+", flags=re.UNICODE)
 # Per-(message, user) cooldown for "Leggi di più" to prevent spam even if the
 # extended summary is cached (avoid rapid-fire ephemeral replies).
 _READMORE_COOLDOWN_S = 5.0
+_READMORE_TTL_S = 60.0  # purge stale entries after this long
 _readmore_last_click: dict[tuple[int, int], float] = {}
+
+
+def _gc_readmore_clicks(now: float) -> None:
+    """Drop entries older than TTL to bound memory growth."""
+    cutoff = now - _READMORE_TTL_S
+    stale = [k for k, ts in _readmore_last_click.items() if ts < cutoff]
+    for k in stale:
+        _readmore_last_click.pop(k, None)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -76,6 +85,7 @@ class ReadMoreView(discord.ui.View):
         msg_id = interaction.message.id if interaction.message else 0
         user_id = interaction.user.id if interaction.user else 0
         now = time.monotonic()
+        _gc_readmore_clicks(now)
         key = (msg_id, user_id)
         last = _readmore_last_click.get(key, 0.0)
         if now - last < _READMORE_COOLDOWN_S:
@@ -179,6 +189,18 @@ async def _send_one(
         )
     except Exception as e:
         logger.warning("register_message fallito per %s: %s", msg.id, e)
+    # Mark posted RIGHT AWAY, per-item, so a SIGTERM/CancelledError during the
+    # inter-message sleep below won't cause re-posting on next cycle. The batch
+    # mark_seen in bot.run_cycle stays as an idempotent safety net.
+    try:
+        storage.mark_posted([{
+            "url": item["url"],
+            "title_norm": item.get("title_norm") or "",
+            "embedding": item.get("embedding"),
+            "source": item.get("source", ""),
+        }])
+    except Exception as e:
+        logger.warning("mark_posted per-item fallito per %s: %s", msg.id, e)
     return msg
 
 
@@ -193,15 +215,13 @@ async def publish(channel: discord.abc.Messageable, items: list[dict]) -> list[d
         return []
 
     target = channel
-    thread = None
     if ENABLE_THREAD_DIGEST and isinstance(channel, discord.TextChannel):
         try:
             header = await channel.send(_digest_header(items))
-            thread = await header.create_thread(
+            target = await header.create_thread(
                 name=f"AI News {datetime.now(timezone.utc).astimezone().strftime('%d/%m %H:%M')}",
                 auto_archive_duration=1440,
             )
-            target = thread
         except discord.DiscordException as e:
             logger.warning("Thread digest fallito, uso canale piatto: %s", e)
             target = channel

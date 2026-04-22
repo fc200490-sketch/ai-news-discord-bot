@@ -98,20 +98,30 @@ def _extract(html: str) -> list[dict]:
     return items
 
 
+def _charset_from_ctype(ctype: str) -> str:
+    """Extract charset from a Content-Type header, default utf-8."""
+    for part in (ctype or "").split(";"):
+        part = part.strip().lower()
+        if part.startswith("charset="):
+            return part.split("=", 1)[1].strip('"') or "utf-8"
+    return "utf-8"
+
+
 async def fetch(session: aiohttp.ClientSession, lookback_hours: int) -> list[dict]:
     try:
-        status, _headers, raw = await http_get(session, NEWS_URL, timeout=_TIMEOUT)
+        status, resp_headers, raw = await http_get(session, NEWS_URL, timeout=_TIMEOUT)
     except Exception as e:
         logger.warning("Anthropic scraper fetch fallito: %s", e)
         return []
     if status != 200:
         logger.warning("Anthropic scraper: HTTP %s", status)
         return []
+    charset = _charset_from_ctype(resp_headers.get("Content-Type", ""))
     try:
+        html = raw.decode(charset, errors="ignore")
+    except (LookupError, UnicodeError) as e:
+        logger.warning("Anthropic scraper decode (%s) fallito, fallback utf-8: %s", charset, e)
         html = raw.decode("utf-8", errors="ignore")
-    except Exception as e:
-        logger.warning("Anthropic scraper decode fallito: %s", e)
-        return []
 
     items = _extract(html)
     if not items:

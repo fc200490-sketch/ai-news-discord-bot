@@ -111,6 +111,12 @@ async def _fetch_one(
     if status != 200:
         logger.warning("Feed %s: HTTP %s", source, status)
         return []
+    # Some servers return an HTML error page with 200 when the RSS endpoint is
+    # temporarily unavailable. Warn early so it's distinguishable from a
+    # legitimately empty feed.
+    ctype = (resp_headers.get("Content-Type") or "").lower()
+    if ctype and not any(tok in ctype for tok in ("xml", "rss", "atom", "application/feed")):
+        logger.warning("Feed %s: Content-Type inatteso %r (atteso XML/RSS/Atom)", source, ctype)
     new_etag = resp_headers.get("ETag")
     new_lm = resp_headers.get("Last-Modified")
     if new_etag or new_lm:
