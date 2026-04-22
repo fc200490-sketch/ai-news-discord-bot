@@ -13,7 +13,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from config import LEGACY_STATE_FILE, STATE_DB_PATH, STATE_TTL_DAYS
+from config import FEEDBACK_TTL_DAYS, LEGACY_STATE_FILE, STATE_DB_PATH, STATE_TTL_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -108,9 +108,12 @@ def _migrate_from_json() -> None:
 
 
 def prune() -> None:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=STATE_TTL_DAYS)).isoformat()
+    now = datetime.now(timezone.utc)
+    posted_cutoff = (now - timedelta(days=STATE_TTL_DAYS)).isoformat()
+    feedback_cutoff = (now - timedelta(days=FEEDBACK_TTL_DAYS)).isoformat()
     with _conn() as con:
-        con.execute("DELETE FROM posted WHERE ts < ?", (cutoff,))
+        con.execute("DELETE FROM posted WHERE ts < ?", (posted_cutoff,))
+        con.execute("DELETE FROM feedback WHERE ts < ?", (feedback_cutoff,))
 
 
 def get_posted_urls() -> set[str]:
@@ -209,7 +212,8 @@ def bump_source_stat(source: str, delta_up: int, delta_down: int) -> None:
     with _conn() as con:
         con.execute(
             "INSERT INTO source_stats(source, up, down) VALUES (?, ?, ?) "
-            "ON CONFLICT(source) DO UPDATE SET up = up + ?, down = down + ?",
+            "ON CONFLICT(source) DO UPDATE SET "
+            "up = MAX(0, up + ?), down = MAX(0, down + ?)",
             (source, max(0, delta_up), max(0, delta_down), delta_up, delta_down),
         )
 

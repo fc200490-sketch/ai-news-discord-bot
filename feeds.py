@@ -22,8 +22,9 @@ FEEDS_IT = [
     ("Il Post", "https://www.ilpost.it/feed/", False),
 ]
 
-# Keywords used to filter generalist Italian feeds. Matched as whole words
-# (word-boundary regex) so "ai" doesn't accidentally match "aiuta", etc.
+# Keywords used to filter generalist Italian feeds. Matched as whole words.
+# Bare "ai"/"a.i." are handled separately via AI_ACRONYM_RE (case-sensitive)
+# to avoid matching the Italian preposition "ai".
 AI_KEYWORDS = [
     "intelligenza artificiale",
     "machine learning",
@@ -38,23 +39,23 @@ AI_KEYWORDS = [
     "modello linguistico",
     "generativa",
     "generative ai",
-    "ai",
-    "a.i.",
     "mistral",
     "meta ai",
     "grok",
 ]
 
-# Keywords that, when present in title or summary, flag the news as high-priority.
-# Rendered as a 🔥 prefix in the embed title.
-PRIORITY_KEYWORDS = [
-    "gpt-5", "gpt-6", "claude 5", "claude 4.5", "claude 4.6",
-    "gemini 2", "gemini 3",
-    "acquisition", "acquires", "acquisisce",
-    "funding", "raises", "raccoglie",
-    "lawsuit", "causa legale",
-    "launch", "launches", "release", "releases", "rilascia", "presenta",
-    "breakthrough",
+# Priority patterns (regex). Match against title+summary (case-insensitive
+# except AI_ACRONYM_RE below). Covers future model versions without edits.
+PRIORITY_PATTERNS = [
+    r"\bgpt[-\s]?\d+(\.\d+)?\b",
+    r"\bclaude\s+\d+(\.\d+)?\b",
+    r"\bgemini\s+\d+(\.\d+)?\b",
+    r"\bllama\s+\d+(\.\d+)?\b",
+    r"\bacqui(sition|res|sisce)\b",
+    r"\b(funding|raises|raccoglie)\b",
+    r"\b(lawsuit|causa\s+legale)\b",
+    r"\b(launch(es)?|release(s)?|rilascia|presenta)\b",
+    r"\bbreakthrough\b",
 ]
 
 
@@ -72,7 +73,9 @@ def _compile(keywords: list[str]) -> re.Pattern:
 
 
 AI_KEYWORDS_RE = _compile(AI_KEYWORDS)
-PRIORITY_KEYWORDS_RE = _compile(PRIORITY_KEYWORDS)
+# Case-sensitive: matches "AI" acronym but not italian preposition "ai".
+AI_ACRONYM_RE = re.compile(r"\bAI\b|(?<![A-Za-z])A\.I\.(?![A-Za-z])")
+PRIORITY_KEYWORDS_RE = re.compile("|".join(PRIORITY_PATTERNS), flags=re.IGNORECASE)
 
 
 def all_feeds():

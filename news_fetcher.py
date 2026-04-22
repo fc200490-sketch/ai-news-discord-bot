@@ -12,7 +12,7 @@ import feedparser
 
 import image_extractor
 from config import ENABLE_FEED_RETRY, FEED_CACHE_FILE, LOOKBACK_HOURS
-from feeds import AI_KEYWORDS_RE, all_feeds
+from feeds import AI_ACRONYM_RE, AI_KEYWORDS_RE, all_feeds
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,10 @@ def _matches_ai(entry) -> bool:
         entry.get("summary", ""),
         " ".join(t.get("term", "") for t in entry.get("tags", []) or []),
     ])
-    return bool(AI_KEYWORDS_RE.search(blob))
+    if AI_KEYWORDS_RE.search(blob):
+        return True
+    # "AI"/"A.I." acronym: case-sensitive to avoid italian preposition "ai".
+    return bool(AI_ACRONYM_RE.search(blob))
 
 
 async def _http_get(session: aiohttp.ClientSession, url: str, headers: dict):

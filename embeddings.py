@@ -1,50 +1,64 @@
-"""Gemini embeddings for semantic dedup, with graceful fallback."""
+"""Gemini embeddings for semantic dedup, with rate limiting and graceful fallback."""
 import asyncio
 import logging
 import math
+import time
 
-from config import ENABLE_EMBEDDING_DEDUP, GEMINI_API_KEY, GEMINI_EMBED_MODEL
+from config import (
+    EMBEDDING_CONCURRENCY,
+    EMBEDDING_MIN_INTERVAL_SECONDS,
+    ENABLE_EMBEDDING_DEDUP,
+    GEMINI_EMBED_MODEL,
+)
+from gemini_client import get_client
 
 logger = logging.getLogger(__name__)
 
-_client = None
-_client_failed = False
+_semaphore: asyncio.Semaphore | None = None
+_rate_lock: asyncio.Lock | None = None
+_last_call_ts: float = 0.0
 
 
-def _get_client():
-    global _client, _client_failed
-    if _client is not None or _client_failed:
-        return _client
-    if not GEMINI_API_KEY:
-        _client_failed = True
-        return None
-    try:
-        from google import genai
-        _client = genai.Client(api_key=GEMINI_API_KEY)
-        return _client
-    except Exception as e:
-        logger.warning("Embedding client non inizializzato: %s", e)
-        _client_failed = True
-        return None
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(max(1, EMBEDDING_CONCURRENCY))
+    return _semaphore
+
+
+async def _rate_gate() -> None:
+    global _rate_lock, _last_call_ts
+    if EMBEDDING_MIN_INTERVAL_SECONDS <= 0:
+        return
+    if _rate_lock is None:
+        _rate_lock = asyncio.Lock()
+    async with _rate_lock:
+        elapsed = time.monotonic() - _last_call_ts
+        wait = EMBEDDING_MIN_INTERVAL_SECONDS - elapsed
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call_ts = time.monotonic()
 
 
 async def embed(text: str) -> list[float] | None:
     if not ENABLE_EMBEDDING_DEDUP or not text:
         return None
-    client = _get_client()
+    client = get_client()
     if client is None:
         return None
-    try:
-        resp = await asyncio.to_thread(
-            client.models.embed_content,
-            model=GEMINI_EMBED_MODEL,
-            contents=text,
-        )
-        values = _extract_values(resp)
-        return values
-    except Exception as e:
-        logger.warning("Embedding fallito: %s", e)
-        return None
+    sem = _get_semaphore()
+    async with sem:
+        await _rate_gate()
+        try:
+            resp = await asyncio.to_thread(
+                client.models.embed_content,
+                model=GEMINI_EMBED_MODEL,
+                contents=text,
+            )
+            return _extract_values(resp)
+        except Exception as e:
+            logger.warning("Embedding fallito: %s", e)
+            return None
 
 
 def _extract_values(resp) -> list[float] | None:

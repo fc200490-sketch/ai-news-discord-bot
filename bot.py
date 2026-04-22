@@ -47,6 +47,7 @@ tree = app_commands.CommandTree(client)
 
 _last_news_now: dict[int, float] = {}
 _cycle_lock = asyncio.Lock()
+_commands_synced = False
 
 ALL_SOURCE_NAMES = sorted({n for n, *_ in FEEDS_EN} | {n for n, *_ in FEEDS_IT})
 
@@ -160,9 +161,14 @@ async def run_cycle(channel: discord.abc.Messageable) -> dict:
 
         await _attach_summaries(fresh)
 
-        sent = await publish(channel, fresh)
-        if sent:
-            mark_seen(sent)
+        sent: list[dict] = []
+        try:
+            sent = await publish(channel, fresh)
+        finally:
+            # Mark whatever was published, even if publish was interrupted,
+            # so we don't re-post on next cycle.
+            if sent:
+                mark_seen(sent)
         logger.info("Ciclo: pubblicate %d/%d", len(sent), len(fresh))
         return {"fetched": len(items), "kept": len(fresh), "sent": len(sent)}
 
@@ -295,23 +301,26 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 
 @client.event
 async def on_ready():
+    global _commands_synced
     logger.info("Bot connesso come %s (id=%s)", client.user, client.user.id)
     logger.info(
         "Config: AI_SUMMARY=%s SMART_DEDUP=%s EMBEDDING_DEDUP=%s",
         ENABLE_AI_SUMMARY, ENABLE_SMART_DEDUP, ENABLE_EMBEDDING_DEDUP,
     )
-    try:
-        channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
-        guild = getattr(channel, "guild", None)
-        if guild is not None:
-            tree.copy_global_to(guild=guild)
-            synced = await tree.sync(guild=guild)
-            logger.info("Slash commands sincronizzate su %s: %d", guild.name, len(synced))
-        else:
-            synced = await tree.sync()
-            logger.info("Slash commands sincronizzate globalmente: %d", len(synced))
-    except Exception as e:
-        logger.warning("Sync slash commands fallita: %s", e)
+    if not _commands_synced:
+        try:
+            channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
+            guild = getattr(channel, "guild", None)
+            if guild is not None:
+                tree.copy_global_to(guild=guild)
+                synced = await tree.sync(guild=guild)
+                logger.info("Slash commands sincronizzate su %s: %d", guild.name, len(synced))
+            else:
+                synced = await tree.sync()
+                logger.info("Slash commands sincronizzate globalmente: %d", len(synced))
+            _commands_synced = True
+        except Exception as e:
+            logger.warning("Sync slash commands fallita: %s", e)
     if not news_cycle.is_running():
         news_cycle.start()
 

@@ -5,6 +5,10 @@ primary_region = "fra"
 [build]
   dockerfile = "Dockerfile"
 
+[env]
+  STATE_DB_PATH = "/data/state.db"
+  FEED_CACHE_FILE = "/data/.feed_cache.json"
+
 [processes]
   app = "python bot.py"
 
@@ -15,5 +19,5 @@ primary_region = "fra"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "256mb"
+  memory = "512mb"
   processes = ["app"]

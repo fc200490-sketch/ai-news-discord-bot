@@ -8,10 +8,10 @@ from config import (
     AI_SUMMARY_CONCURRENCY,
     AI_SUMMARY_MIN_INTERVAL_SECONDS,
     ENABLE_AI_SUMMARY,
-    GEMINI_API_KEY,
     GEMINI_MODEL,
     SUMMARY_LANGUAGE,
 )
+from gemini_client import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,6 @@ def _system_prompt(max_chars: int, extended: bool) -> str:
     )
 
 
-_client = None
 _semaphore: asyncio.Semaphore | None = None
 _rate_lock: asyncio.Lock | None = None
 _last_call_ts: float = 0.0
@@ -73,21 +72,6 @@ async def _rate_gate() -> None:
         if wait > 0:
             await asyncio.sleep(wait)
         _last_call_ts = time.monotonic()
-
-
-def _get_client():
-    global _client
-    if _client is not None:
-        return _client
-    if not GEMINI_API_KEY:
-        return None
-    try:
-        from google import genai
-        _client = genai.Client(api_key=GEMINI_API_KEY)
-        return _client
-    except Exception as e:
-        logger.warning("Gemini client non inizializzato: %s", e)
-        return None
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -130,7 +114,7 @@ def _post_process(raw: str, max_chars: int) -> str:
 
 
 async def _run(title: str, excerpt: str, extended: bool) -> str | None:
-    client = _get_client()
+    client = get_client()
     if client is None:
         return None
     max_chars = _MAX_OUTPUT_CHARS_EXTENDED if extended else _MAX_OUTPUT_CHARS
