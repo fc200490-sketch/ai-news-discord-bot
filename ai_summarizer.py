@@ -139,10 +139,20 @@ async def _run(title: str, excerpt: str, extended: bool) -> str | None:
                     )
                     return text
                 logger.warning("Gemini output vuoto (tentativo %d)", attempt)
+                backoff = 2
             except Exception as e:
-                logger.warning("Gemini summarize fallito (tentativo %d): %s", attempt, e)
+                msg = str(e)
+                # Adaptive backoff: rate-limit errors need a longer cooldown than
+                # transient failures, otherwise we burn the second retry on the
+                # same quota.
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+                    backoff = 45
+                    logger.warning("Gemini rate-limit (tentativo %d): %s", attempt, e)
+                else:
+                    backoff = 2
+                    logger.warning("Gemini summarize fallito (tentativo %d): %s", attempt, e)
             if attempt == 1:
-                await asyncio.sleep(2)
+                await asyncio.sleep(backoff)
     return None
 
 

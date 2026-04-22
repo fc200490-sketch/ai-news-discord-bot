@@ -163,9 +163,14 @@ async def fetch_all() -> list[dict]:
             for name, url, ai_dedicated, lang in all_feeds()
         ]
         tasks.append(anthropic_scraper.fetch(session, LOOKBACK_HOURS))
-        results = await asyncio.gather(*tasks, return_exceptions=False)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
     if ENABLE_FEED_RETRY:
         _save_feed_cache(feed_cache)
-    flat = [item for batch in results for item in batch]
+    flat: list[dict] = []
+    for batch in results:
+        if isinstance(batch, BaseException):
+            logger.warning("Fetch task fallito: %s", batch)
+            continue
+        flat.extend(batch)
     flat.sort(key=lambda x: x["published"], reverse=True)
     return flat

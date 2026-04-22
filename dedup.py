@@ -65,6 +65,9 @@ def find_semantic_duplicate(
             ts = datetime.fromisoformat(ts_raw) if ts_raw else None
         except (TypeError, ValueError):
             ts = None
+        if ts is not None and ts.tzinfo is None:
+            # Legacy records migrated from JSON may lack tz — assume UTC.
+            ts = ts.replace(tzinfo=timezone.utc)
         if ts is None or ts < cutoff:
             continue
 

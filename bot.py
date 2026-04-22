@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import time
+from datetime import time as dtime, timezone
 
 import discord
 from discord import app_commands
@@ -20,6 +21,7 @@ from config import (
     ENABLE_REACTION_FEEDBACK,
     ENABLE_SMART_DEDUP,
     FETCH_INTERVAL_HOURS,
+    FETCH_TIMES_UTC,
     NEWS_NOW_COOLDOWN_SECONDS,
     SIMILARITY_THRESHOLD,
 )
@@ -185,14 +187,42 @@ async def run_cycle(channel: discord.abc.Messageable) -> dict:
         return {"fetched": len(items), "kept": len(fresh), "sent": len(sent)}
 
 
-@tasks.loop(hours=FETCH_INTERVAL_HOURS)
-async def news_cycle():
-    try:
-        channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
-    except discord.DiscordException as e:
-        logger.error("Canale non raggiungibile: %s", e)
-        return
-    await run_cycle(channel)
+def _parse_fetch_times(raw: str) -> list[dtime]:
+    times: list[dtime] = []
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            hh, mm = chunk.split(":")
+            times.append(dtime(int(hh), int(mm), tzinfo=timezone.utc))
+        except (ValueError, TypeError):
+            logger.warning("FETCH_TIMES_UTC: ignoro valore invalido %r", chunk)
+    return times
+
+
+_fixed_times = _parse_fetch_times(FETCH_TIMES_UTC)
+
+if _fixed_times:
+    logger.info("Scheduler wall-clock UTC: %s", [t.isoformat() for t in _fixed_times])
+
+    @tasks.loop(time=_fixed_times)
+    async def news_cycle():
+        try:
+            channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
+        except discord.DiscordException as e:
+            logger.error("Canale non raggiungibile: %s", e)
+            return
+        await run_cycle(channel)
+else:
+    @tasks.loop(hours=FETCH_INTERVAL_HOURS)
+    async def news_cycle():
+        try:
+            channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
+        except discord.DiscordException as e:
+            logger.error("Canale non raggiungibile: %s", e)
+            return
+        await run_cycle(channel)
 
 
 @news_cycle.before_loop

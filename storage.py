@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS feedback (
     source TEXT NOT NULL,
     ts TEXT NOT NULL,
     title TEXT,
-    excerpt TEXT
+    excerpt TEXT,
+    extended_summary TEXT
 );
 """
 
@@ -73,7 +74,7 @@ def init() -> None:
         con.executescript(_SCHEMA)
         con.execute("PRAGMA journal_mode=WAL")
         # ALTER for feedback columns added after initial release.
-        for col in ("title", "excerpt"):
+        for col in ("title", "excerpt", "extended_summary"):
             try:
                 con.execute(f"ALTER TABLE feedback ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
@@ -230,6 +231,24 @@ def get_message_content(message_id: int) -> tuple[str, str] | None:
     if not row:
         return None
     return (row[0] or "", row[1] or "")
+
+
+def get_extended_summary(message_id: int) -> str | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT extended_summary FROM feedback WHERE message_id = ?", (message_id,)
+        ).fetchone()
+    if not row or not row[0]:
+        return None
+    return row[0]
+
+
+def set_extended_summary(message_id: int, text: str) -> None:
+    with _conn() as con:
+        con.execute(
+            "UPDATE feedback SET extended_summary = ? WHERE message_id = ?",
+            (text, message_id),
+        )
 
 
 def bump_source_stat(source: str, delta_up: int, delta_down: int) -> None:

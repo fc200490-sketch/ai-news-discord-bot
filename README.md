@@ -45,6 +45,7 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | Modello per gli embeddings |
 | `SUMMARY_LANGUAGE` | `it` | Lingua dei riassunti (`it`, `en`, `es`, `fr`, `de`, `pt`) |
 | `STATE_DB_PATH` | `state.db` | Path SQLite (su Railway/Fly punta al volume) |
+| `FETCH_TIMES_UTC` | — | Opzionale: `HH:MM,HH:MM` UTC. Se impostato, sovrascrive l'intervallo di 12h con orari fissi (es. `07:00,19:00`). |
 | `ENABLE_AI_SUMMARY` | `true` | Attiva riassunti AI |
 | `ENABLE_SMART_DEDUP` | `true` | Attiva dedup semantica |
 | `ENABLE_EMBEDDING_DEDUP` | `true` | Usa embedding (altrimenti solo lessicale) |
@@ -93,6 +94,12 @@ fly volumes create botstate --size 1
 # env: STATE_DB_PATH=/data/state.db
 fly deploy
 ```
+
+> **Importante — secrets vs env**: `DISCORD_TOKEN` e `GEMINI_API_KEY` sono credenziali e NON vanno nel blocco `[env]` di `fly.toml` (finirebbero in git). Imposta come secrets cifrati:
+> ```bash
+> fly secrets set DISCORD_TOKEN=xxx DISCORD_CHANNEL_ID=123 GEMINI_API_KEY=yyy
+> ```
+> Sono disponibili come normali variabili d'ambiente a runtime. Il blocco `[env]` resta riservato a configurazione non-sensitive (`STATE_DB_PATH`, `FEED_CACHE_FILE`, flag `ENABLE_*`, ecc.).
 
 **Railway**: funziona ma i volumi richiedono piano Hobby ($5/mo). Senza volume, `state.db` si resetta ad ogni redeploy → il bot ripubblica notizie già viste.
 

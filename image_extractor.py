@@ -41,24 +41,33 @@ def _is_safe_http_url(url: str) -> bool:
     return True
 
 
+def _http_scheme_ok(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        return urlparse(url).scheme in ("http", "https")
+    except ValueError:
+        return False
+
+
 def from_entry(entry) -> str | None:
     thumbs = entry.get("media_thumbnail") or []
     for t in thumbs:
         url = t.get("url")
-        if url:
+        if _http_scheme_ok(url):
             return url
 
     media = entry.get("media_content") or []
     for m in media:
         url = m.get("url")
         mtype = (m.get("type") or "").lower()
-        if url and (not mtype or mtype.startswith("image")):
+        if _http_scheme_ok(url) and (not mtype or mtype.startswith("image")):
             return url
 
     for enc in entry.get("enclosures") or []:
         url = enc.get("href") or enc.get("url")
         mtype = (enc.get("type") or "").lower()
-        if url and mtype.startswith("image"):
+        if _http_scheme_ok(url) and mtype.startswith("image"):
             return url
 
     return None

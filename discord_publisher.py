@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 
 import discord
@@ -21,11 +22,15 @@ logger = logging.getLogger(__name__)
 
 COLOR_EN = 0x3498DB
 COLOR_IT = 0x2ECC71
-COLOR_DIGEST = 0x5865F2
 
 FEEDBACK_UP = "👍"
 FEEDBACK_DOWN = "👎"
 _WORD_RE = re.compile(r"\w+", flags=re.UNICODE)
+
+# Per-(message, user) cooldown for "Leggi di più" to prevent spam even if the
+# extended summary is cached (avoid rapid-fire ephemeral replies).
+_READMORE_COOLDOWN_S = 5.0
+_readmore_last_click: dict[tuple[int, int], float] = {}
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -68,8 +73,26 @@ class ReadMoreView(discord.ui.View):
         custom_id=READMORE_CUSTOM_ID,
     )
     async def read_more(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
         msg_id = interaction.message.id if interaction.message else 0
+        user_id = interaction.user.id if interaction.user else 0
+        now = time.monotonic()
+        key = (msg_id, user_id)
+        last = _readmore_last_click.get(key, 0.0)
+        if now - last < _READMORE_COOLDOWN_S:
+            await interaction.response.send_message(
+                "Un attimo, troppe richieste ravvicinate.", ephemeral=True,
+            )
+            return
+        _readmore_last_click[key] = now
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # Served-from-cache path: avoid Gemini call entirely.
+        cached = storage.get_extended_summary(msg_id)
+        if cached:
+            await interaction.followup.send(content=_truncate(cached, 1800), ephemeral=True)
+            return
+
         content = storage.get_message_content(msg_id)
         if not content:
             await interaction.followup.send(
@@ -78,6 +101,11 @@ class ReadMoreView(discord.ui.View):
             return
         title, excerpt = content
         text = await ai_summarizer.summarize_extended(title, excerpt)
+        if text:
+            try:
+                storage.set_extended_summary(msg_id, text)
+            except Exception as e:
+                logger.debug("Cache extended_summary fallito: %s", e)
         text = text or excerpt or "Nessun dettaglio disponibile."
         await interaction.followup.send(content=_truncate(text, 1800), ephemeral=True)
 
@@ -132,21 +160,26 @@ async def _send_one(
     view = ReadMoreView(item) if ENABLE_READ_MORE else None
     try:
         msg = await target.send(embed=embed, view=view) if view else await target.send(embed=embed)
-        if ENABLE_REACTION_FEEDBACK:
-            try:
-                await msg.add_reaction(FEEDBACK_UP)
-                await msg.add_reaction(FEEDBACK_DOWN)
-            except discord.DiscordException as e:
-                logger.debug("Reactions add fallito: %s", e)
+    except discord.DiscordException as e:
+        logger.error("Invio fallito per %s: %s", item.get("url"), e)
+        return None
+    # Non-Discord failures below (reactions race, DB lock) must not drop the
+    # already-sent message — catch broadly so publish continues.
+    if ENABLE_REACTION_FEEDBACK:
+        try:
+            await msg.add_reaction(FEEDBACK_UP)
+            await msg.add_reaction(FEEDBACK_DOWN)
+        except Exception as e:
+            logger.debug("Reactions add fallito: %s", e)
+    try:
         storage.register_message(
             msg.id, item["url"], item.get("source", ""),
             title=item.get("title", ""),
             excerpt=item.get("summary") or "",
         )
-        return msg
-    except discord.DiscordException as e:
-        logger.error("Invio fallito per %s: %s", item.get("url"), e)
-        return None
+    except Exception as e:
+        logger.warning("register_message fallito per %s: %s", msg.id, e)
+    return msg
 
 
 async def publish(channel: discord.abc.Messageable, items: list[dict]) -> list[dict]:

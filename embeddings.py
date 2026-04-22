@@ -48,17 +48,26 @@ async def embed(text: str) -> list[float] | None:
         return None
     sem = _get_semaphore()
     async with sem:
-        await _rate_gate()
-        try:
-            resp = await asyncio.to_thread(
-                client.models.embed_content,
-                model=GEMINI_EMBED_MODEL,
-                contents=text,
-            )
-            return _extract_values(resp)
-        except Exception as e:
-            logger.warning("Embedding fallito: %s", e)
-            return None
+        for attempt in (1, 2):
+            await _rate_gate()
+            try:
+                resp = await asyncio.to_thread(
+                    client.models.embed_content,
+                    model=GEMINI_EMBED_MODEL,
+                    contents=text,
+                )
+                return _extract_values(resp)
+            except Exception as e:
+                msg = str(e)
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+                    backoff = 45
+                    logger.warning("Embedding rate-limit (tentativo %d): %s", attempt, e)
+                else:
+                    backoff = 2
+                    logger.warning("Embedding fallito (tentativo %d): %s", attempt, e)
+                if attempt == 1:
+                    await asyncio.sleep(backoff)
+        return None
 
 
 def _extract_values(resp) -> list[float] | None:

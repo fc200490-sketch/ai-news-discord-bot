@@ -50,6 +50,9 @@ except ValueError:
 
 FETCH_INTERVAL_HOURS = 12
 LOOKBACK_HOURS = 12
+# Optional: "HH:MM,HH:MM" in UTC. If set, overrides FETCH_INTERVAL_HOURS and the
+# bot publishes at those fixed wall-clock times each day.
+FETCH_TIMES_UTC = os.getenv("FETCH_TIMES_UTC", "").strip()
 STATE_DB_PATH = os.getenv("STATE_DB_PATH", "state.db").strip() or "state.db"
 LEGACY_STATE_FILE = "posted_urls.json"
 FEED_CACHE_FILE = os.getenv("FEED_CACHE_FILE", ".feed_cache.json").strip() or ".feed_cache.json"
