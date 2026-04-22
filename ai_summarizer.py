@@ -2,9 +2,11 @@
 import asyncio
 import logging
 import re
+import time
 
 from config import (
     AI_SUMMARY_CONCURRENCY,
+    AI_SUMMARY_MIN_INTERVAL_SECONDS,
     ENABLE_AI_SUMMARY,
     GEMINI_API_KEY,
     GEMINI_MODEL,
@@ -54,6 +56,23 @@ def _system_prompt(max_chars: int, extended: bool) -> str:
 
 _client = None
 _semaphore: asyncio.Semaphore | None = None
+_rate_lock: asyncio.Lock | None = None
+_last_call_ts: float = 0.0
+
+
+async def _rate_gate() -> None:
+    """Ensure at least AI_SUMMARY_MIN_INTERVAL_SECONDS between consecutive calls."""
+    global _rate_lock, _last_call_ts
+    if AI_SUMMARY_MIN_INTERVAL_SECONDS <= 0:
+        return
+    if _rate_lock is None:
+        _rate_lock = asyncio.Lock()
+    async with _rate_lock:
+        elapsed = time.monotonic() - _last_call_ts
+        wait = AI_SUMMARY_MIN_INTERVAL_SECONDS - elapsed
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call_ts = time.monotonic()
 
 
 def _get_client():
@@ -121,6 +140,7 @@ async def _run(title: str, excerpt: str, extended: bool) -> str | None:
 
     async with sem:
         for attempt in (1, 2):
+            await _rate_gate()
             try:
                 response = await asyncio.to_thread(
                     client.models.generate_content,
