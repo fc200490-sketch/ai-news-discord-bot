@@ -1,0 +1,8 @@
+.env
+posted_urls.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.vscode/
