@@ -55,7 +55,10 @@ _initialized = False
 
 @contextmanager
 def _conn():
-    con = sqlite3.connect(STATE_DB_PATH)
+    """SQLite connection with a lock timeout. The `timeout=5.0` tells SQLite
+    to wait up to 5s for a competing writer to release the lock (under WAL,
+    with the brief writer windows we have, this is effectively never hit)."""
+    con = sqlite3.connect(STATE_DB_PATH, timeout=5.0)
     try:
         yield con
         con.commit()

@@ -58,7 +58,7 @@ LEGACY_STATE_FILE = "posted_urls.json"
 FEED_CACHE_FILE = os.getenv("FEED_CACHE_FILE", ".feed_cache.json").strip() or ".feed_cache.json"
 STATE_TTL_DAYS = 14
 FEEDBACK_TTL_DAYS = 45
-RATE_LIMIT_SECONDS = 1.5
+RATE_LIMIT_SECONDS = _env_float("RATE_LIMIT_SECONDS", 1.5)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or None
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()

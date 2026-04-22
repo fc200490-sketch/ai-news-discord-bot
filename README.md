@@ -62,6 +62,7 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `EMBEDDING_CONCURRENCY` | `2` | Chiamate embedding in parallelo |
 | `EMBEDDING_MIN_INTERVAL_SECONDS` | `0.5` | Intervallo minimo tra chiamate embedding |
 | `NEWS_NOW_COOLDOWN_SECONDS` | `300` | Cooldown `/news-now` per canale |
+| `RATE_LIMIT_SECONDS` | `1.5` | Pausa tra un embed e il successivo (rispetto rate-limit Discord) |
 | `READING_WPM` | `200` | Parole/minuto per tempo di lettura |
 
 ## Slash commands

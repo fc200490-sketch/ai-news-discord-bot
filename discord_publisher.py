@@ -173,14 +173,9 @@ async def _send_one(
     except discord.DiscordException as e:
         logger.error("Invio fallito per %s: %s", item.get("url"), e)
         return None
-    # Non-Discord failures below (reactions race, DB lock) must not drop the
-    # already-sent message — catch broadly so publish continues.
-    if ENABLE_REACTION_FEEDBACK:
-        try:
-            await msg.add_reaction(FEEDBACK_UP)
-            await msg.add_reaction(FEEDBACK_DOWN)
-        except Exception as e:
-            logger.debug("Reactions add fallito: %s", e)
+    # Persist BEFORE any awaitable work: register + mark_posted are synchronous
+    # SQLite calls, so no CancelledError can sneak in between target.send and
+    # mark_posted. Reactions (awaitable) come AFTER persistence.
     try:
         storage.register_message(
             msg.id, item["url"], item.get("source", ""),
@@ -189,9 +184,6 @@ async def _send_one(
         )
     except Exception as e:
         logger.warning("register_message fallito per %s: %s", msg.id, e)
-    # Mark posted RIGHT AWAY, per-item, so a SIGTERM/CancelledError during the
-    # inter-message sleep below won't cause re-posting on next cycle. The batch
-    # mark_seen in bot.run_cycle stays as an idempotent safety net.
     try:
         storage.mark_posted([{
             "url": item["url"],
@@ -201,6 +193,14 @@ async def _send_one(
         }])
     except Exception as e:
         logger.warning("mark_posted per-item fallito per %s: %s", msg.id, e)
+    # Reactions are a nice-to-have; failures (including cancellation) don't
+    # roll back the already-persisted post.
+    if ENABLE_REACTION_FEEDBACK:
+        try:
+            await msg.add_reaction(FEEDBACK_UP)
+            await msg.add_reaction(FEEDBACK_DOWN)
+        except Exception as e:
+            logger.debug("Reactions add fallito: %s", e)
     return msg
 
 

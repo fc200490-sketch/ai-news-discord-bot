@@ -55,23 +55,40 @@ def _system_prompt(max_chars: int, extended: bool) -> str:
 
 
 _semaphore: asyncio.Semaphore | None = None
-_rate_lock: asyncio.Lock | None = None
-_last_call_ts: float = 0.0
+# Separate gates so a "Leggi di più" click isn't stuck behind a long batch of
+# short summaries (and vice versa). Both enforce the same per-lane interval.
+_rate_lock_short: asyncio.Lock | None = None
+_rate_lock_extended: asyncio.Lock | None = None
+_last_call_ts_short: float = 0.0
+_last_call_ts_extended: float = 0.0
 
 
-async def _rate_gate() -> None:
-    """Ensure at least AI_SUMMARY_MIN_INTERVAL_SECONDS between consecutive calls."""
-    global _rate_lock, _last_call_ts
+async def _rate_gate(extended: bool) -> None:
+    """Ensure at least AI_SUMMARY_MIN_INTERVAL_SECONDS between consecutive calls
+    in the same lane (short batch vs extended/on-demand)."""
+    global _rate_lock_short, _rate_lock_extended
+    global _last_call_ts_short, _last_call_ts_extended
     if AI_SUMMARY_MIN_INTERVAL_SECONDS <= 0:
         return
-    if _rate_lock is None:
-        _rate_lock = asyncio.Lock()
-    async with _rate_lock:
-        elapsed = time.monotonic() - _last_call_ts
+    if extended:
+        if _rate_lock_extended is None:
+            _rate_lock_extended = asyncio.Lock()
+        lock = _rate_lock_extended
+    else:
+        if _rate_lock_short is None:
+            _rate_lock_short = asyncio.Lock()
+        lock = _rate_lock_short
+    async with lock:
+        last = _last_call_ts_extended if extended else _last_call_ts_short
+        elapsed = time.monotonic() - last
         wait = AI_SUMMARY_MIN_INTERVAL_SECONDS - elapsed
         if wait > 0:
             await asyncio.sleep(wait)
-        _last_call_ts = time.monotonic()
+        now = time.monotonic()
+        if extended:
+            _last_call_ts_extended = now
+        else:
+            _last_call_ts_short = now
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -124,7 +141,7 @@ async def _run(title: str, excerpt: str, extended: bool) -> str | None:
 
     async with sem:
         for attempt in (1, 2):
-            await _rate_gate()
+            await _rate_gate(extended)
             try:
                 response = await asyncio.to_thread(
                     client.models.generate_content,

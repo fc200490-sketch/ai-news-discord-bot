@@ -58,14 +58,21 @@ ALL_SOURCE_NAMES = sorted(
 
 
 async def _compute_embeddings(items: list[dict]) -> None:
-    if not ENABLE_EMBEDDING_DEDUP:
+    if not ENABLE_EMBEDDING_DEDUP or not items:
         return
     coros = [embeddings.embed(it["title"]) for it in items]
     results = await asyncio.gather(*coros, return_exceptions=True)
+    ok = 0
     for item, res in zip(items, results):
         if isinstance(res, Exception) or res is None:
             continue
         item["embedding"] = res
+        ok += 1
+    failed = len(items) - ok
+    if failed:
+        logger.warning("Embeddings: %d/%d OK, %d falliti", ok, len(items), failed)
+    else:
+        logger.info("Embeddings: %d/%d OK", ok, len(items))
 
 
 def _prefilter(fresh: list[dict], channel_id: int) -> list[dict]:
@@ -201,28 +208,21 @@ def _parse_fetch_times(raw: str) -> list[dtime]:
     return times
 
 
-_fixed_times = _parse_fetch_times(FETCH_TIMES_UTC)
+async def _do_news_cycle() -> None:
+    try:
+        channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
+    except discord.DiscordException as e:
+        logger.error("Canale non raggiungibile: %s", e)
+        return
+    await run_cycle(channel)
 
+
+_fixed_times = _parse_fetch_times(FETCH_TIMES_UTC)
 if _fixed_times:
     logger.info("Scheduler wall-clock UTC: %s", [t.isoformat() for t in _fixed_times])
-
-    @tasks.loop(time=_fixed_times)
-    async def news_cycle():
-        try:
-            channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
-        except discord.DiscordException as e:
-            logger.error("Canale non raggiungibile: %s", e)
-            return
-        await run_cycle(channel)
+    news_cycle = tasks.loop(time=_fixed_times)(_do_news_cycle)
 else:
-    @tasks.loop(hours=FETCH_INTERVAL_HOURS)
-    async def news_cycle():
-        try:
-            channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
-        except discord.DiscordException as e:
-            logger.error("Canale non raggiungibile: %s", e)
-            return
-        await run_cycle(channel)
+    news_cycle = tasks.loop(hours=FETCH_INTERVAL_HOURS)(_do_news_cycle)
 
 
 @news_cycle.before_loop
