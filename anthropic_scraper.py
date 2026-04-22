@@ -11,6 +11,8 @@ from urllib.parse import urljoin
 import aiohttp
 from bs4 import BeautifulSoup
 
+from http_client import http_get
+
 logger = logging.getLogger(__name__)
 
 SOURCE_NAME = "Anthropic"
@@ -98,18 +100,23 @@ def _extract(html: str) -> list[dict]:
 
 async def fetch(session: aiohttp.ClientSession, lookback_hours: int) -> list[dict]:
     try:
-        async with session.get(NEWS_URL, timeout=_TIMEOUT) as resp:
-            if resp.status != 200:
-                logger.warning("Anthropic scraper: HTTP %s", resp.status)
-                return []
-            html = await resp.text(errors="ignore")
+        status, _headers, raw = await http_get(session, NEWS_URL, timeout=_TIMEOUT)
     except Exception as e:
         logger.warning("Anthropic scraper fetch fallito: %s", e)
+        return []
+    if status != 200:
+        logger.warning("Anthropic scraper: HTTP %s", status)
+        return []
+    try:
+        html = raw.decode("utf-8", errors="ignore")
+    except Exception as e:
+        logger.warning("Anthropic scraper decode fallito: %s", e)
         return []
 
     items = _extract(html)
     if not items:
-        logger.warning("Anthropic scraper: 0 entry estratte (markup cambiato?)")
+        # Raise to ERROR so Fly logs surface it — markup likely changed.
+        logger.error("Anthropic scraper: 0 entry estratte (markup cambiato?)")
         return []
 
     cutoff = datetime.now(timezone.utc).timestamp() - lookback_hours * 3600

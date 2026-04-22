@@ -43,27 +43,42 @@ def _reading_time_minutes(item: dict) -> int:
     return minutes
 
 
-class ReadMoreView(discord.ui.View):
-    def __init__(self, item: dict):
-        super().__init__(timeout=None)
-        self._item = item
-        self._cached: str | None = None
-        link_btn = discord.ui.Button(
-            label="Apri articolo",
-            style=discord.ButtonStyle.link,
-            url=item["url"],
-        )
-        self.add_item(link_btn)
+READMORE_CUSTOM_ID = "news:readmore"
 
-    @discord.ui.button(label="Leggi di più", style=discord.ButtonStyle.secondary)
+
+class ReadMoreView(discord.ui.View):
+    """Persistent view. Link button has a dynamic URL (no callback needed, so
+    it survives restarts by being rendered client-side). The "Leggi di più"
+    button uses a static custom_id and looks up title/excerpt from storage on
+    click, so it also works across restarts."""
+
+    def __init__(self, item: dict | None = None):
+        super().__init__(timeout=None)
+        if item is not None:
+            link_btn = discord.ui.Button(
+                label="Apri articolo",
+                style=discord.ButtonStyle.link,
+                url=item["url"],
+            )
+            self.add_item(link_btn)
+
+    @discord.ui.button(
+        label="Leggi di più",
+        style=discord.ButtonStyle.secondary,
+        custom_id=READMORE_CUSTOM_ID,
+    )
     async def read_more(self, interaction: discord.Interaction, _button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if not self._cached:
-            self._cached = await ai_summarizer.summarize_extended(
-                self._item.get("title", ""),
-                self._item.get("summary") or "",
+        msg_id = interaction.message.id if interaction.message else 0
+        content = storage.get_message_content(msg_id)
+        if not content:
+            await interaction.followup.send(
+                "Dati non più disponibili per questo messaggio.", ephemeral=True,
             )
-        text = self._cached or self._item.get("summary") or "Nessun dettaglio disponibile."
+            return
+        title, excerpt = content
+        text = await ai_summarizer.summarize_extended(title, excerpt)
+        text = text or excerpt or "Nessun dettaglio disponibile."
         await interaction.followup.send(content=_truncate(text, 1800), ephemeral=True)
 
 
@@ -123,7 +138,11 @@ async def _send_one(
                 await msg.add_reaction(FEEDBACK_DOWN)
             except discord.DiscordException as e:
                 logger.debug("Reactions add fallito: %s", e)
-        storage.register_message(msg.id, item["url"], item.get("source", ""))
+        storage.register_message(
+            msg.id, item["url"], item.get("source", ""),
+            title=item.get("title", ""),
+            excerpt=item.get("summary") or "",
+        )
         return msg
     except discord.DiscordException as e:
         logger.error("Invio fallito per %s: %s", item.get("url"), e)

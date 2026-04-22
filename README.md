@@ -42,7 +42,7 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `DISCORD_CHANNEL_ID` | — | ID canale (obbligatorio) |
 | `GEMINI_API_KEY` | — | Chiave Gemini (opzionale) |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Modello per i riassunti |
-| `GEMINI_EMBED_MODEL` | `text-embedding-004` | Modello per gli embeddings |
+| `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | Modello per gli embeddings |
 | `SUMMARY_LANGUAGE` | `it` | Lingua dei riassunti (`it`, `en`, `es`, `fr`, `de`, `pt`) |
 | `STATE_DB_PATH` | `state.db` | Path SQLite (su Railway/Fly punta al volume) |
 | `ENABLE_AI_SUMMARY` | `true` | Attiva riassunti AI |
@@ -56,7 +56,10 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `SIMILARITY_THRESHOLD` | `0.82` | Soglia dedup lessicale (fallback) |
 | `EMBEDDING_SIMILARITY_THRESHOLD` | `0.88` | Soglia cosine similarity embedding |
 | `DEDUP_WINDOW_HOURS` | `48` | Finestra titoli recenti |
-| `AI_SUMMARY_CONCURRENCY` | `5` | Chiamate Gemini in parallelo |
+| `AI_SUMMARY_CONCURRENCY` | `1` | Chiamate Gemini in parallelo (free tier: tieni basso) |
+| `AI_SUMMARY_MIN_INTERVAL_SECONDS` | `13.0` | Intervallo minimo tra chiamate summary (free tier RPM) |
+| `EMBEDDING_CONCURRENCY` | `2` | Chiamate embedding in parallelo |
+| `EMBEDDING_MIN_INTERVAL_SECONDS` | `0.5` | Intervallo minimo tra chiamate embedding |
 | `NEWS_NOW_COOLDOWN_SECONDS` | `300` | Cooldown `/news-now` per canale |
 | `READING_WPM` | `200` | Parole/minuto per tempo di lettura |
 

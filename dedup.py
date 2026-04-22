@@ -14,7 +14,7 @@ _STOPWORDS = {
     "il", "la", "lo", "i", "gli", "le", "un", "una", "uno",
     "di", "da", "in", "su", "con", "per", "tra", "fra",
     "e", "o", "ma", "che", "non", "del", "della", "dei", "delle", "degli",
-    "al", "alla", "ai", "agli", "alle", "nel", "nella", "nei", "negli", "nelle",
+    "al", "alla", "agli", "alle", "nel", "nella", "nei", "negli", "nelle",
     "è", "sono", "ha", "hanno", "sia",
     # EN
     "the", "a", "an", "of", "to", "on", "for", "and", "or", "but",

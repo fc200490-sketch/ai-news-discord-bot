@@ -146,7 +146,7 @@ async def _run(title: str, excerpt: str, extended: bool) -> str | None:
     return None
 
 
-async def summarize(title: str, summary_raw: str, language: str) -> str | None:
+async def summarize(title: str, summary_raw: str) -> str | None:
     if not ENABLE_AI_SUMMARY:
         return None
     return await _run(title, summary_raw, extended=False)

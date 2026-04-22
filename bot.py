@@ -30,9 +30,10 @@ from dedup import (
     mark_seen,
     normalize_title,
 )
-from discord_publisher import FEEDBACK_DOWN, FEEDBACK_UP, publish
+from discord_publisher import FEEDBACK_DOWN, FEEDBACK_UP, ReadMoreView, publish
 from feeds import FEEDS_EN, FEEDS_IT
 from news_fetcher import fetch_all
+from anthropic_scraper import SOURCE_NAME as ANTHROPIC_SOURCE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +50,9 @@ _last_news_now: dict[int, float] = {}
 _cycle_lock = asyncio.Lock()
 _commands_synced = False
 
-ALL_SOURCE_NAMES = sorted({n for n, *_ in FEEDS_EN} | {n for n, *_ in FEEDS_IT})
+ALL_SOURCE_NAMES = sorted(
+    {n for n, *_ in FEEDS_EN} | {n for n, *_ in FEEDS_IT} | {ANTHROPIC_SOURCE}
+)
 
 
 async def _compute_embeddings(items: list[dict]) -> None:
@@ -63,11 +66,11 @@ async def _compute_embeddings(items: list[dict]) -> None:
         item["embedding"] = res
 
 
-def _filter_and_group(fresh: list[dict], channel_id: int) -> list[dict]:
-    """URL dedup + semantic dedup + muted source filter + multi-source grouping."""
+def _prefilter(fresh: list[dict], channel_id: int) -> list[dict]:
+    """Cheap filters (URL dedup + muted sources) — run BEFORE expensive Gemini
+    embedding calls so we don't spend quota on items we'll throw away."""
     posted_urls = get_posted_urls()
     muted = set(storage.list_muted_sources(channel_id))
-
     candidates: list[dict] = []
     for item in fresh:
         if item["url"] in posted_urls:
@@ -76,12 +79,19 @@ def _filter_and_group(fresh: list[dict], channel_id: int) -> list[dict]:
             continue
         item["title_norm"] = normalize_title(item["title"])
         candidates.append(item)
+    return candidates
 
+
+def _semantic_group(candidates: list[dict]) -> list[dict]:
+    """Semantic dedup against recent history + intra-cycle grouping."""
     if not ENABLE_SMART_DEDUP:
         return candidates
 
     seen_recent = load_seen_recent(DEDUP_WINDOW_HOURS)
     kept: list[dict] = []
+    # Incremental view of kept items, to avoid rebuilding on each candidate.
+    kept_view: list[dict] = []
+    kept_by_url: dict[str, dict] = {}
 
     for item in candidates:
         # vs already-posted (cross-cycle): discard, can't retro-edit old messages
@@ -95,33 +105,32 @@ def _filter_and_group(fresh: list[dict], channel_id: int) -> list[dict]:
             continue
 
         # vs kept intra-cycle: merge sources instead of discarding
-        kept_as_candidates = [
-            {
-                "url": k["url"], "ts": k["published"].isoformat(),
-                "title_norm": k["title_norm"], "embedding": k.get("embedding"),
-            }
-            for k in kept
-        ]
         match = find_semantic_duplicate(
-            item, kept_as_candidates,
+            item, kept_view,
             EMBEDDING_SIMILARITY_THRESHOLD, SIMILARITY_THRESHOLD,
             DEDUP_WINDOW_HOURS,
         )
         if match:
-            for k in kept:
-                if k["url"] == match["url"]:
-                    k.setdefault("also_on", [])
-                    src = item.get("source")
-                    if src and src not in k["also_on"] and src != k.get("source"):
-                        k["also_on"].append(src)
-                    logger.info(
-                        "Raggruppato: %r da %s confluisce in %s",
-                        item["title"], src, k["url"],
-                    )
-                    break
+            k = kept_by_url.get(match["url"])
+            if k is not None:
+                k.setdefault("also_on", [])
+                src = item.get("source")
+                if src and src not in k["also_on"] and src != k.get("source"):
+                    k["also_on"].append(src)
+                logger.info(
+                    "Raggruppato: %r da %s confluisce in %s",
+                    item["title"], src, k["url"],
+                )
             continue
 
         kept.append(item)
+        kept_by_url[item["url"]] = item
+        kept_view.append({
+            "url": item["url"],
+            "ts": item["published"].isoformat(),
+            "title_norm": item["title_norm"],
+            "embedding": item.get("embedding"),
+        })
     return kept
 
 
@@ -129,7 +138,7 @@ async def _attach_summaries(items: list[dict]) -> None:
     if not ENABLE_AI_SUMMARY or not items:
         return
     coros = [
-        ai_summarizer.summarize(it["title"], it.get("summary", ""), it["language"])
+        ai_summarizer.summarize(it["title"], it.get("summary", ""))
         for it in items
     ]
     results = await asyncio.gather(*coros, return_exceptions=True)
@@ -150,11 +159,14 @@ async def run_cycle(channel: discord.abc.Messageable) -> dict:
             logger.exception("Errore durante il fetch: %s", e)
             return {"error": str(e), "sent": 0}
 
-        await _compute_embeddings(items)
-
         channel_id = getattr(channel, "id", 0)
-        fresh = _filter_and_group(items, channel_id)
-        logger.info("%d fetched → %d dopo dedup/grouping", len(items), len(fresh))
+        candidates = _prefilter(items, channel_id)
+        logger.info("%d fetched → %d dopo URL/mute prefilter", len(items), len(candidates))
+
+        await _compute_embeddings(candidates)
+
+        fresh = _semantic_group(candidates)
+        logger.info("%d candidates → %d dopo dedup/grouping", len(candidates), len(fresh))
 
         if not fresh:
             return {"fetched": len(items), "sent": 0}
@@ -206,13 +218,23 @@ async def news_now(interaction: discord.Interaction):
         )
         return
     _last_news_now[interaction.channel_id or 0] = now
-    await interaction.response.send_message("Ciclo in esecuzione…", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     stats = await run_cycle(interaction.channel)
-    await interaction.followup.send(
+    summary = (
         f"Fatto. Fetched: {stats.get('fetched', 0)} · "
-        f"Da pubblicare: {stats.get('kept', 0)} · Pubblicate: {stats.get('sent', 0)}",
-        ephemeral=True,
+        f"Da pubblicare: {stats.get('kept', 0)} · Pubblicate: {stats.get('sent', 0)}"
     )
+    # Interaction token expires after ~15 min. If the cycle took longer, the
+    # followup fails — fall back to a regular channel message so the admin
+    # still sees the outcome.
+    try:
+        await interaction.followup.send(summary, ephemeral=True)
+    except discord.DiscordException as e:
+        logger.warning("Followup /news-now scaduto (%s); invio sul canale.", e)
+        try:
+            await interaction.channel.send(f"`/news-now` → {summary}")
+        except discord.DiscordException:
+            pass
 
 
 async def _source_autocomplete(_interaction, current: str):
@@ -299,10 +321,16 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
     storage.bump_source_stat(source, -delta[0], -delta[1])
 
 
+_view_registered = False
+
+
 @client.event
 async def on_ready():
-    global _commands_synced
+    global _commands_synced, _view_registered
     logger.info("Bot connesso come %s (id=%s)", client.user, client.user.id)
+    if not _view_registered:
+        client.add_view(ReadMoreView())
+        _view_registered = True
     logger.info(
         "Config: AI_SUMMARY=%s SMART_DEDUP=%s EMBEDDING_DEDUP=%s",
         ENABLE_AI_SUMMARY, ENABLE_SMART_DEDUP, ENABLE_EMBEDDING_DEDUP,

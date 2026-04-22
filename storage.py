@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS feedback (
     message_id INTEGER PRIMARY KEY,
     url TEXT NOT NULL,
     source TEXT NOT NULL,
-    ts TEXT NOT NULL
+    ts TEXT NOT NULL,
+    title TEXT,
+    excerpt TEXT
 );
 """
 
@@ -69,6 +71,13 @@ def init() -> None:
         os.makedirs(parent, exist_ok=True)
     with _conn() as con:
         con.executescript(_SCHEMA)
+        con.execute("PRAGMA journal_mode=WAL")
+        # ALTER for feedback columns added after initial release.
+        for col in ("title", "excerpt"):
+            try:
+                con.execute(f"ALTER TABLE feedback ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError:
+                pass  # already exists
     _migrate_from_json()
     _initialized = True
     logger.info("Storage inizializzato: %s", STATE_DB_PATH)
@@ -191,12 +200,16 @@ def list_muted_sources(channel_id: int) -> list[str]:
     return [r[0] for r in rows]
 
 
-def register_message(message_id: int, url: str, source: str) -> None:
+def register_message(
+    message_id: int, url: str, source: str,
+    title: str = "", excerpt: str = "",
+) -> None:
     now_iso = datetime.now(timezone.utc).isoformat()
     with _conn() as con:
         con.execute(
-            "INSERT OR IGNORE INTO feedback(message_id, url, source, ts) VALUES (?, ?, ?, ?)",
-            (message_id, url, source, now_iso),
+            "INSERT OR IGNORE INTO feedback(message_id, url, source, ts, title, excerpt) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (message_id, url, source, now_iso, title, excerpt),
         )
 
 
@@ -206,6 +219,17 @@ def get_message_source(message_id: int) -> str | None:
             "SELECT source FROM feedback WHERE message_id = ?", (message_id,)
         ).fetchone()
     return row[0] if row else None
+
+
+def get_message_content(message_id: int) -> tuple[str, str] | None:
+    """Return (title, excerpt) stored at publish time, or None if unknown."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT title, excerpt FROM feedback WHERE message_id = ?", (message_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return (row[0] or "", row[1] or "")
 
 
 def bump_source_stat(source: str, delta_up: int, delta_down: int) -> None:

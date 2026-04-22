@@ -14,16 +14,15 @@ import anthropic_scraper
 import image_extractor
 from config import ENABLE_FEED_RETRY, FEED_CACHE_FILE, LOOKBACK_HOURS
 from feeds import AI_ACRONYM_RE, AI_KEYWORDS_RE, all_feeds
+from http_client import http_get
 
 logger = logging.getLogger(__name__)
 
-HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
-_RETRY_BACKOFFS = (0.5, 2.0)
 
 
 def _load_feed_cache() -> dict:
@@ -83,27 +82,6 @@ def _matches_ai(entry) -> bool:
     return bool(AI_ACRONYM_RE.search(blob))
 
 
-async def _http_get(session: aiohttp.ClientSession, url: str, headers: dict):
-    attempts = (0, *(_RETRY_BACKOFFS if ENABLE_FEED_RETRY else ()))
-    last_exc = None
-    for idx, delay in enumerate(attempts):
-        if delay:
-            await asyncio.sleep(delay)
-        try:
-            resp = await session.get(url, timeout=HTTP_TIMEOUT, headers=headers)
-            if resp.status in (500, 502, 503, 504) and idx < len(attempts) - 1:
-                resp.release()
-                last_exc = RuntimeError(f"HTTP {resp.status}")
-                continue
-            return resp
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            last_exc = e
-            if idx == len(attempts) - 1:
-                raise
-    if last_exc:
-        raise last_exc
-
-
 async def _fetch_one(
     session: aiohttp.ClientSession,
     source: str,
@@ -122,25 +100,21 @@ async def _fetch_one(
             headers["If-Modified-Since"] = cached["last_modified"]
 
     try:
-        resp = await _http_get(session, url, headers)
+        status, resp_headers, raw = await http_get(session, url, headers)
     except Exception as e:
         logger.warning("Fetch fallito per %s (%s): %s", source, url, e)
         return []
 
-    try:
-        if resp.status == 304:
-            logger.info("Feed %s: 304 Not Modified", source)
-            return []
-        if resp.status != 200:
-            logger.warning("Feed %s: HTTP %s", source, resp.status)
-            return []
-        raw = await resp.read()
-        new_etag = resp.headers.get("ETag")
-        new_lm = resp.headers.get("Last-Modified")
-        if new_etag or new_lm:
-            feed_cache[url] = {"etag": new_etag, "last_modified": new_lm}
-    finally:
-        resp.release()
+    if status == 304:
+        logger.info("Feed %s: 304 Not Modified", source)
+        return []
+    if status != 200:
+        logger.warning("Feed %s: HTTP %s", source, status)
+        return []
+    new_etag = resp_headers.get("ETag")
+    new_lm = resp_headers.get("Last-Modified")
+    if new_etag or new_lm:
+        feed_cache[url] = {"etag": new_etag, "last_modified": new_lm}
 
     parsed = feedparser.parse(raw)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
