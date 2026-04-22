@@ -6,6 +6,34 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 _channel_id_raw = os.getenv("DISCORD_CHANNEL_ID")
 
@@ -22,6 +50,31 @@ except ValueError:
 
 FETCH_INTERVAL_HOURS = 12
 LOOKBACK_HOURS = 12
-STATE_FILE = "posted_urls.json"
+STATE_DB_PATH = os.getenv("STATE_DB_PATH", "state.db").strip() or "state.db"
+LEGACY_STATE_FILE = "posted_urls.json"
+FEED_CACHE_FILE = ".feed_cache.json"
 STATE_TTL_DAYS = 14
 RATE_LIMIT_SECONDS = 1.5
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or None
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "text-embedding-004").strip()
+
+ENABLE_AI_SUMMARY = _env_bool("ENABLE_AI_SUMMARY", True) and GEMINI_API_KEY is not None
+ENABLE_SMART_DEDUP = _env_bool("ENABLE_SMART_DEDUP", True)
+ENABLE_THUMBNAILS = _env_bool("ENABLE_THUMBNAILS", True)
+ENABLE_FEED_RETRY = _env_bool("ENABLE_FEED_RETRY", True)
+ENABLE_EMBEDDING_DEDUP = _env_bool("ENABLE_EMBEDDING_DEDUP", True) and GEMINI_API_KEY is not None
+ENABLE_THREAD_DIGEST = _env_bool("ENABLE_THREAD_DIGEST", True)
+ENABLE_READ_MORE = _env_bool("ENABLE_READ_MORE", True) and GEMINI_API_KEY is not None
+ENABLE_REACTION_FEEDBACK = _env_bool("ENABLE_REACTION_FEEDBACK", True)
+
+SIMILARITY_THRESHOLD = _env_float("SIMILARITY_THRESHOLD", 0.82)
+EMBEDDING_SIMILARITY_THRESHOLD = _env_float("EMBEDDING_SIMILARITY_THRESHOLD", 0.88)
+DEDUP_WINDOW_HOURS = _env_int("DEDUP_WINDOW_HOURS", 48)
+
+AI_SUMMARY_CONCURRENCY = _env_int("AI_SUMMARY_CONCURRENCY", 5)
+SUMMARY_LANGUAGE = os.getenv("SUMMARY_LANGUAGE", "it").strip().lower() or "it"
+
+NEWS_NOW_COOLDOWN_SECONDS = _env_int("NEWS_NOW_COOLDOWN_SECONDS", 300)
+READING_WPM = _env_int("READING_WPM", 200)

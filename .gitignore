@@ -1,8 +1,26 @@
-.env
-posted_urls.json
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .venv/
 venv/
+.env
+.env.local
+
+# Bot state (persist via deploy volume, not git)
+state.db
+state.db-journal
+state.db-wal
+state.db-shm
+posted_urls.json
+posted_urls.json.migrated
+.feed_cache.json
+
+# IDE
 .idea/
 .vscode/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

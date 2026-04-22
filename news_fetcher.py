@@ -1,6 +1,8 @@
-"""Fetch and normalize RSS entries."""
+"""Fetch and normalize RSS entries, with ETag caching and retry."""
 import asyncio
+import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -8,13 +10,33 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 import feedparser
 
-from config import LOOKBACK_HOURS
-from feeds import AI_KEYWORDS, all_feeds
+import image_extractor
+from config import ENABLE_FEED_RETRY, FEED_CACHE_FILE, LOOKBACK_HOURS
+from feeds import AI_KEYWORDS_RE, all_feeds
 
 logger = logging.getLogger(__name__)
 
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
-USER_AGENT = "AINewsDiscordBot/1.0 (+https://github.com/)"
+USER_AGENT = "Mozilla/5.0 (compatible; AINewsDiscordBot/1.1; +https://github.com/)"
+_RETRY_BACKOFFS = (0.5, 2.0)
+
+
+def _load_feed_cache() -> dict:
+    if not os.path.exists(FEED_CACHE_FILE):
+        return {}
+    try:
+        with open(FEED_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_feed_cache(cache: dict) -> None:
+    try:
+        with open(FEED_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        logger.debug("Impossibile salvare feed cache: %s", e)
 
 
 def _parse_date(entry) -> datetime | None:
@@ -49,22 +71,73 @@ def _matches_ai(entry) -> bool:
         entry.get("title", ""),
         entry.get("summary", ""),
         " ".join(t.get("term", "") for t in entry.get("tags", []) or []),
-    ]).lower()
-    return any(k in blob for k in AI_KEYWORDS)
+    ])
+    return bool(AI_KEYWORDS_RE.search(blob))
 
 
-async def _fetch_one(session: aiohttp.ClientSession, source: str, url: str, ai_dedicated: bool, language: str):
+async def _http_get(session: aiohttp.ClientSession, url: str, headers: dict):
+    attempts = (0, *(_RETRY_BACKOFFS if ENABLE_FEED_RETRY else ()))
+    last_exc = None
+    for idx, delay in enumerate(attempts):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            resp = await session.get(url, timeout=HTTP_TIMEOUT, headers=headers)
+            if resp.status in (500, 502, 503, 504) and idx < len(attempts) - 1:
+                resp.release()
+                last_exc = RuntimeError(f"HTTP {resp.status}")
+                continue
+            return resp
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            last_exc = e
+            if idx == len(attempts) - 1:
+                raise
+    if last_exc:
+        raise last_exc
+
+
+async def _fetch_one(
+    session: aiohttp.ClientSession,
+    source: str,
+    url: str,
+    ai_dedicated: bool,
+    language: str,
+    feed_cache: dict,
+    thumb_cache: dict,
+):
+    headers: dict[str, str] = {}
+    cached = feed_cache.get(url) or {}
+    if ENABLE_FEED_RETRY:
+        if cached.get("etag"):
+            headers["If-None-Match"] = cached["etag"]
+        if cached.get("last_modified"):
+            headers["If-Modified-Since"] = cached["last_modified"]
+
     try:
-        async with session.get(url, timeout=HTTP_TIMEOUT) as resp:
-            resp.raise_for_status()
-            raw = await resp.read()
+        resp = await _http_get(session, url, headers)
     except Exception as e:
         logger.warning("Fetch fallito per %s (%s): %s", source, url, e)
         return []
 
+    try:
+        if resp.status == 304:
+            logger.info("Feed %s: 304 Not Modified", source)
+            return []
+        if resp.status != 200:
+            logger.warning("Feed %s: HTTP %s", source, resp.status)
+            return []
+        raw = await resp.read()
+        new_etag = resp.headers.get("ETag")
+        new_lm = resp.headers.get("Last-Modified")
+        if new_etag or new_lm:
+            feed_cache[url] = {"etag": new_etag, "last_modified": new_lm}
+    finally:
+        resp.release()
+
     parsed = feedparser.parse(raw)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
-    items = []
+    thumb_tasks = []
+    staged = []
     for entry in parsed.entries:
         pub = _parse_date(entry)
         if pub is None or pub < cutoff:
@@ -75,26 +148,41 @@ async def _fetch_one(session: aiohttp.ClientSession, source: str, url: str, ai_d
         title = entry.get("title")
         if not link or not title:
             continue
-        items.append({
+        item = {
             "title": title.strip(),
             "url": link.strip(),
             "summary": _strip_html(entry.get("summary", ""))[:500],
             "source": source,
             "published": pub,
             "language": language,
-        })
-    logger.info("Feed %s: %d entry nelle ultime %dh", source, len(items), LOOKBACK_HOURS)
-    return items
+            "thumbnail_url": None,
+        }
+        staged.append(item)
+        thumb_tasks.append(image_extractor.resolve(session, entry, item["url"], thumb_cache))
+
+    if thumb_tasks:
+        thumbs = await asyncio.gather(*thumb_tasks, return_exceptions=True)
+        for item, thumb in zip(staged, thumbs):
+            if isinstance(thumb, Exception):
+                continue
+            item["thumbnail_url"] = thumb
+
+    logger.info("Feed %s: %d entry nelle ultime %dh", source, len(staged), LOOKBACK_HOURS)
+    return staged
 
 
 async def fetch_all() -> list[dict]:
     headers = {"User-Agent": USER_AGENT}
+    feed_cache = _load_feed_cache() if ENABLE_FEED_RETRY else {}
+    thumb_cache: dict = {}
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks = [
-            _fetch_one(session, name, url, ai_dedicated, lang)
+            _fetch_one(session, name, url, ai_dedicated, lang, feed_cache, thumb_cache)
             for name, url, ai_dedicated, lang in all_feeds()
         ]
         results = await asyncio.gather(*tasks, return_exceptions=False)
+    if ENABLE_FEED_RETRY:
+        _save_feed_cache(feed_cache)
     flat = [item for batch in results for item in batch]
     flat.sort(key=lambda x: x["published"], reverse=True)
     return flat
