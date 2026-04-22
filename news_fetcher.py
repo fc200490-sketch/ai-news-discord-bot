@@ -10,6 +10,7 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 import feedparser
 
+import anthropic_scraper
 import image_extractor
 from config import ENABLE_FEED_RETRY, FEED_CACHE_FILE, LOOKBACK_HOURS
 from feeds import AI_ACRONYM_RE, AI_KEYWORDS_RE, all_feeds
@@ -17,7 +18,11 @@ from feeds import AI_ACRONYM_RE, AI_KEYWORDS_RE, all_feeds
 logger = logging.getLogger(__name__)
 
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
-USER_AGENT = "Mozilla/5.0 (compatible; AINewsDiscordBot/1.1; +https://github.com/)"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 _RETRY_BACKOFFS = (0.5, 2.0)
 
 
@@ -183,6 +188,7 @@ async def fetch_all() -> list[dict]:
             _fetch_one(session, name, url, ai_dedicated, lang, feed_cache, thumb_cache)
             for name, url, ai_dedicated, lang in all_feeds()
         ]
+        tasks.append(anthropic_scraper.fetch(session, LOOKBACK_HOURS))
         results = await asyncio.gather(*tasks, return_exceptions=False)
     if ENABLE_FEED_RETRY:
         _save_feed_cache(feed_cache)

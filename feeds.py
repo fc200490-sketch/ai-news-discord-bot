@@ -11,7 +11,8 @@ FEEDS_EN = [
     ("MIT Technology Review", "https://www.technologyreview.com/topic/artificial-intelligence/feed", True),
     ("Ars Technica AI", "https://arstechnica.com/tag/artificial-intelligence/feed/", True),
     ("VentureBeat AI", "https://venturebeat.com/category/ai/feed/", True),
-    ("Anthropic", "https://www.anthropic.com/news/rss.xml", True),
+    ("Hugging Face", "https://huggingface.co/blog/feed.xml", True),
+    ("Simon Willison", "https://simonwillison.net/atom/everything/", True),
     ("OpenAI", "https://openai.com/blog/rss.xml", True),
     ("Google DeepMind", "https://deepmind.google/blog/rss.xml", True),
 ]
@@ -19,7 +20,8 @@ FEEDS_EN = [
 FEEDS_IT = [
     ("DDAY", "https://www.dday.it/feed", False),
     ("Wired IT", "https://www.wired.it/feed/rss", False),
-    ("Il Post", "https://www.ilpost.it/feed/", False),
+    ("HDBlog", "https://www.hdblog.it/rss/", False),
+    ("Repubblica Tech", "https://www.repubblica.it/rss/tecnologia/rss2.0.xml", False),
 ]
 
 # Keywords used to filter generalist Italian feeds. Matched as whole words.
