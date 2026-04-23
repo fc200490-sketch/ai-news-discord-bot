@@ -64,6 +64,11 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `NEWS_NOW_COOLDOWN_SECONDS` | `300` | Cooldown `/news-now` per canale |
 | `RATE_LIMIT_SECONDS` | `1.5` | Pausa tra un embed e il successivo (rispetto rate-limit Discord) |
 | `READING_WPM` | `200` | Parole/minuto per tempo di lettura |
+| `FETCH_INTERVAL_HOURS` | `12` | Frequenza cicli (ignorato se `FETCH_TIMES_UTC` è impostato) |
+| `LOOKBACK_HOURS` | `12` | Finestra di raccolta entry dai feed |
+| `STATE_TTL_DAYS` | `14` | Quanti giorni ricordiamo un URL già pubblicato |
+| `FEEDBACK_TTL_DAYS` | `45` | Retention messaggi→feedback |
+| `WATCHDOG_MAX_DOWN_SECONDS` | `600` | Se il gateway Discord resta disconnesso oltre questa soglia, il processo esce (Fly riavvia) |
 
 ## Slash commands
 
@@ -73,7 +78,7 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `/mute-source <source>` | Manage Server | Silenzia una fonte nel canale corrente |
 | `/unmute-source <source>` | Manage Server | Riattiva una fonte |
 | `/list-muted` | Tutti | Elenca le fonti silenziate |
-| `/stats` | Tutti | Classifica delle fonti per feedback 👍/👎 aggregato |
+| `/stats` | Tutti | Metriche runtime (uptime, cicli, notizie pubblicate, errori) + classifica feedback 👍/👎 per fonte |
 
 ## Esecuzione locale
 ```bash

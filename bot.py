@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import os
-import sys
 import time
 from datetime import datetime, time as dtime, timezone
 
@@ -67,6 +66,7 @@ _metrics: dict = {
 }
 
 # --- Gateway watchdog state ---
+_gateway_connected: bool = False
 _last_gateway_ok_ts: float = time.monotonic()
 _WATCHDOG_MAX_DOWN_S = float(os.getenv("WATCHDOG_MAX_DOWN_SECONDS", "600"))
 _WATCHDOG_POLL_S = 60.0
@@ -449,29 +449,42 @@ _watchdog_started = False
 
 @client.event
 async def on_connect():
-    global _last_gateway_ok_ts
+    global _gateway_connected, _last_gateway_ok_ts
+    _gateway_connected = True
     _last_gateway_ok_ts = time.monotonic()
 
 
 @client.event
 async def on_resumed():
-    global _last_gateway_ok_ts
+    global _gateway_connected, _last_gateway_ok_ts
+    _gateway_connected = True
     _last_gateway_ok_ts = time.monotonic()
 
 
+@client.event
+async def on_disconnect():
+    global _gateway_connected
+    _gateway_connected = False
+
+
 async def _gateway_watchdog() -> None:
-    """Exit the process if the gateway stays disconnected beyond a grace window.
-    Fly restarts the VM, which is faster than waiting for a stuck reconnect loop."""
+    """Hard-exit the process if the gateway stays disconnected beyond a grace
+    window. discord.py auto-reconnects, but if reconnect is stuck in a loop
+    (wedged websocket, bad DNS, auth loop) Fly can recover us faster than we
+    can recover ourselves."""
+    global _last_gateway_ok_ts
     while True:
         await asyncio.sleep(_WATCHDOG_POLL_S)
-        if client.is_closed():
-            down = time.monotonic() - _last_gateway_ok_ts
-            if down > _WATCHDOG_MAX_DOWN_S:
-                logger.error("Watchdog: gateway down for %.0fs > %.0fs, exiting",
-                             down, _WATCHDOG_MAX_DOWN_S)
-                sys.exit(1)
-        else:
-            globals()["_last_gateway_ok_ts"] = time.monotonic()
+        if _gateway_connected:
+            _last_gateway_ok_ts = time.monotonic()
+            continue
+        down = time.monotonic() - _last_gateway_ok_ts
+        if down > _WATCHDOG_MAX_DOWN_S:
+            logger.error(
+                "Watchdog: gateway down for %.0fs > %.0fs, exiting",
+                down, _WATCHDOG_MAX_DOWN_S,
+            )
+            os._exit(1)
 
 
 @client.event
