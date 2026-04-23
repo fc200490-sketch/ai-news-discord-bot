@@ -1,8 +1,10 @@
 """Discord AI-news bot entry point."""
 import asyncio
 import logging
+import os
+import sys
 import time
-from datetime import time as dtime, timezone
+from datetime import datetime, time as dtime, timezone
 
 import discord
 from discord import app_commands
@@ -24,6 +26,7 @@ from config import (
     FETCH_TIMES_UTC,
     NEWS_NOW_COOLDOWN_SECONDS,
     SIMILARITY_THRESHOLD,
+    STATE_TTL_DAYS,
 )
 from dedup import (
     find_semantic_duplicate,
@@ -51,6 +54,22 @@ _last_news_now: dict[int, float] = {}
 _NEWS_NOW_GC_TTL_S = 3600.0
 _cycle_lock = asyncio.Lock()
 _commands_synced = False
+
+# --- Runtime metrics (in-memory, reset on restart) ---
+_metrics: dict = {
+    "started_utc": datetime.now(timezone.utc),
+    "cycles": 0,
+    "fetched_total": 0,
+    "published_total": 0,
+    "errors_total": 0,
+    "last_cycle_utc": None,
+    "last_published": 0,
+}
+
+# --- Gateway watchdog state ---
+_last_gateway_ok_ts: float = time.monotonic()
+_WATCHDOG_MAX_DOWN_S = float(os.getenv("WATCHDOG_MAX_DOWN_SECONDS", "600"))
+_WATCHDOG_POLL_S = 60.0
 
 
 def _gc_news_now(now: float) -> None:
@@ -85,7 +104,7 @@ async def _compute_embeddings(items: list[dict]) -> None:
 def _prefilter(fresh: list[dict], channel_id: int) -> list[dict]:
     """Cheap filters (URL dedup + muted sources) — run BEFORE expensive Gemini
     embedding calls so we don't spend quota on items we'll throw away."""
-    posted_urls = get_posted_urls()
+    posted_urls = get_posted_urls(window_hours=STATE_TTL_DAYS * 24)
     muted = set(storage.list_muted_sources(channel_id))
     candidates: list[dict] = []
     for item in fresh:
@@ -173,6 +192,7 @@ async def run_cycle(channel: discord.abc.Messageable) -> dict:
             items = await fetch_all()
         except Exception as e:
             logger.exception("Fetch error: %s", e)
+            _metrics["errors_total"] += 1
             return {"error": str(e), "sent": 0}
 
         channel_id = getattr(channel, "id", 0)
@@ -198,6 +218,11 @@ async def run_cycle(channel: discord.abc.Messageable) -> dict:
             except Exception as e:
                 logger.debug("Prune failed: %s", e)
         logger.info("Cycle: published %d/%d", len(sent), len(fresh))
+        _metrics["cycles"] += 1
+        _metrics["fetched_total"] += len(items)
+        _metrics["published_total"] += len(sent)
+        _metrics["last_cycle_utc"] = datetime.now(timezone.utc)
+        _metrics["last_published"] = len(sent)
         return {"fetched": len(items), "kept": len(fresh), "sent": len(sent)}
 
 
@@ -336,26 +361,47 @@ async def list_muted_cmd(interaction: discord.Interaction):
     )
 
 
-@tree.command(name="stats", description="Mostra le statistiche 👍/👎 per fonte.")
-async def stats_cmd(interaction: discord.Interaction):
-    stats = storage.get_source_stats()
-    if not stats:
-        await interaction.response.send_message(
-            "Ancora nessun feedback registrato.", ephemeral=True,
-        )
-        return
-    # Sort by net score (up - down), then up count as tiebreak.
-    ranked = sorted(
-        stats.items(),
-        key=lambda kv: (kv[1]["up"] - kv[1]["down"], kv[1]["up"]),
-        reverse=True,
+def _format_runtime_block() -> str:
+    started = _metrics["started_utc"]
+    uptime = datetime.now(timezone.utc) - started
+    hours = int(uptime.total_seconds() // 3600)
+    mins = int((uptime.total_seconds() % 3600) // 60)
+    last = _metrics["last_cycle_utc"]
+    last_str = last.strftime("%d/%m %H:%M UTC") if last else "mai"
+    avg = (
+        _metrics["published_total"] / _metrics["cycles"]
+        if _metrics["cycles"] else 0.0
     )
-    lines = [
-        f"• **{src}** — 👍 {v['up']} · 👎 {v['down']}  (net {v['up'] - v['down']:+d})"
-        for src, v in ranked[:20]
-    ]
+    return (
+        f"**Runtime**\n"
+        f"• Uptime: {hours}h{mins:02d}m\n"
+        f"• Cicli eseguiti: {_metrics['cycles']}\n"
+        f"• Notizie pubblicate: {_metrics['published_total']} "
+        f"(media {avg:.1f}/ciclo)\n"
+        f"• Errori di fetch: {_metrics['errors_total']}\n"
+        f"• Ultimo ciclo: {last_str} ({_metrics['last_published']} pubblicate)"
+    )
+
+
+@tree.command(name="stats", description="Statistiche runtime + 👍/👎 per fonte.")
+async def stats_cmd(interaction: discord.Interaction):
+    runtime_block = _format_runtime_block()
+    stats = storage.get_source_stats()
+    if stats:
+        ranked = sorted(
+            stats.items(),
+            key=lambda kv: (kv[1]["up"] - kv[1]["down"], kv[1]["up"]),
+            reverse=True,
+        )
+        feedback_lines = [
+            f"• **{src}** — 👍 {v['up']} · 👎 {v['down']}  (net {v['up'] - v['down']:+d})"
+            for src, v in ranked[:20]
+        ]
+        feedback_block = "**Feedback per fonte**\n" + "\n".join(feedback_lines)
+    else:
+        feedback_block = "**Feedback per fonte**\nNessun feedback registrato."
     await interaction.response.send_message(
-        "**Feedback per fonte**\n" + "\n".join(lines), ephemeral=True,
+        runtime_block + "\n\n" + feedback_block, ephemeral=True,
     )
 
 
@@ -398,15 +444,46 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 
 
 _view_registered = False
+_watchdog_started = False
+
+
+@client.event
+async def on_connect():
+    global _last_gateway_ok_ts
+    _last_gateway_ok_ts = time.monotonic()
+
+
+@client.event
+async def on_resumed():
+    global _last_gateway_ok_ts
+    _last_gateway_ok_ts = time.monotonic()
+
+
+async def _gateway_watchdog() -> None:
+    """Exit the process if the gateway stays disconnected beyond a grace window.
+    Fly restarts the VM, which is faster than waiting for a stuck reconnect loop."""
+    while True:
+        await asyncio.sleep(_WATCHDOG_POLL_S)
+        if client.is_closed():
+            down = time.monotonic() - _last_gateway_ok_ts
+            if down > _WATCHDOG_MAX_DOWN_S:
+                logger.error("Watchdog: gateway down for %.0fs > %.0fs, exiting",
+                             down, _WATCHDOG_MAX_DOWN_S)
+                sys.exit(1)
+        else:
+            globals()["_last_gateway_ok_ts"] = time.monotonic()
 
 
 @client.event
 async def on_ready():
-    global _commands_synced, _view_registered
+    global _commands_synced, _view_registered, _watchdog_started
     logger.info("Bot connected as %s (id=%s)", client.user, client.user.id)
     if not _view_registered:
         client.add_view(ReadMoreView())
         _view_registered = True
+    if not _watchdog_started:
+        client.loop.create_task(_gateway_watchdog())
+        _watchdog_started = True
     logger.info(
         "Config: AI_SUMMARY=%s SMART_DEDUP=%s EMBEDDING_DEDUP=%s",
         ENABLE_AI_SUMMARY, ENABLE_SMART_DEDUP, ENABLE_EMBEDDING_DEDUP,

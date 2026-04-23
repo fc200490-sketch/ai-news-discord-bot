@@ -90,7 +90,7 @@ def load_seen_recent(window_hours: int) -> list[dict]:
     return storage.load_recent_posted(window_hours)
 
 
-def get_posted_urls() -> set[str]:
-    return storage.get_posted_urls()
+def get_posted_urls(window_hours: int | None = None) -> set[str]:
+    return storage.get_posted_urls(window_hours)
 
 

@@ -2,9 +2,6 @@
 app = "ai-news-discord-bot"
 primary_region = "fra"
 
-[experimental]
-  auto_rollback = true
-
 [build]
   dockerfile = "Dockerfile"
 

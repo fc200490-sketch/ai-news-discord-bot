@@ -147,9 +147,19 @@ def prune() -> None:
         con.execute("DELETE FROM feedback WHERE ts < ?", (feedback_cutoff,))
 
 
-def get_posted_urls() -> set[str]:
+def get_posted_urls(window_hours: int | None = None) -> set[str]:
+    """Return URLs seen within `window_hours` (defaults to the full STATE_TTL
+    window, which is already bounded by prune())."""
     with _conn() as con:
-        rows = con.execute("SELECT url FROM posted").fetchall()
+        if window_hours is None:
+            rows = con.execute("SELECT url FROM posted").fetchall()
+        else:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(hours=window_hours)
+            ).isoformat()
+            rows = con.execute(
+                "SELECT url FROM posted WHERE ts >= ?", (cutoff,)
+            ).fetchall()
     return {r[0] for r in rows}
 
 
