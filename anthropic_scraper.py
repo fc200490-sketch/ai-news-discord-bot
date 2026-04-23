@@ -111,7 +111,7 @@ async def fetch(session: aiohttp.ClientSession, lookback_hours: int) -> list[dic
     try:
         status, resp_headers, raw = await http_get(session, NEWS_URL, timeout=_TIMEOUT)
     except Exception as e:
-        logger.warning("Anthropic scraper fetch fallito: %s", e)
+        logger.warning("Anthropic scraper fetch failed: %s", e)
         return []
     if status != 200:
         logger.warning("Anthropic scraper: HTTP %s", status)
@@ -120,19 +120,19 @@ async def fetch(session: aiohttp.ClientSession, lookback_hours: int) -> list[dic
     try:
         html = raw.decode(charset, errors="ignore")
     except (LookupError, UnicodeError) as e:
-        logger.warning("Anthropic scraper decode (%s) fallito, fallback utf-8: %s", charset, e)
+        logger.warning("Anthropic scraper decode (%s) failed, falling back to utf-8: %s", charset, e)
         html = raw.decode("utf-8", errors="ignore")
 
     items = _extract(html)
     if not items:
-        # Raise to ERROR so Fly logs surface it — markup likely changed.
-        logger.error("Anthropic scraper: 0 entry estratte (markup cambiato?)")
+        # Transient upstream failures are common; escalate only if it persists.
+        logger.warning("Anthropic scraper: 0 entries extracted (transient or markup change?)")
         return []
 
     cutoff = datetime.now(timezone.utc).timestamp() - lookback_hours * 3600
     fresh = [it for it in items if it["published"].timestamp() >= cutoff]
     logger.info(
-        "Feed %s (scraper): %d entry totali, %d nelle ultime %dh",
+        "Feed %s (scraper): %d total entries, %d in last %dh",
         SOURCE_NAME, len(items), len(fresh), lookback_hours,
     )
     return fresh

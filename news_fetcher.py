@@ -36,11 +36,17 @@ def _load_feed_cache() -> dict:
 
 
 def _save_feed_cache(cache: dict) -> None:
+    tmp = FEED_CACHE_FILE + ".tmp"
     try:
-        with open(FEED_CACHE_FILE, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, FEED_CACHE_FILE)
     except OSError as e:
-        logger.debug("Impossibile salvare feed cache: %s", e)
+        logger.debug("Cannot save feed cache: %s", e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _parse_date(entry) -> datetime | None:
@@ -102,7 +108,7 @@ async def _fetch_one(
     try:
         status, resp_headers, raw = await http_get(session, url, headers)
     except Exception as e:
-        logger.warning("Fetch fallito per %s (%s): %s", source, url, e)
+        logger.warning("Fetch failed for %s (%s): %s", source, url, e)
         return []
 
     if status == 304:
@@ -116,7 +122,7 @@ async def _fetch_one(
     # legitimately empty feed.
     ctype = (resp_headers.get("Content-Type") or "").lower()
     if ctype and not any(tok in ctype for tok in ("xml", "rss", "atom", "application/feed")):
-        logger.warning("Feed %s: Content-Type inatteso %r (atteso XML/RSS/Atom)", source, ctype)
+        logger.warning("Feed %s: unexpected Content-Type %r (expected XML/RSS/Atom)", source, ctype)
     new_etag = resp_headers.get("ETag")
     new_lm = resp_headers.get("Last-Modified")
     if new_etag or new_lm:
@@ -155,7 +161,7 @@ async def _fetch_one(
                 continue
             item["thumbnail_url"] = thumb
 
-    logger.info("Feed %s: %d entry nelle ultime %dh", source, len(staged), LOOKBACK_HOURS)
+    logger.info("Feed %s: %d entries in last %dh", source, len(staged), LOOKBACK_HOURS)
     return staged
 
 
@@ -175,7 +181,7 @@ async def fetch_all() -> list[dict]:
     flat: list[dict] = []
     for batch in results:
         if isinstance(batch, BaseException):
-            logger.warning("Fetch task fallito: %s", batch)
+            logger.warning("Fetch task failed: %s", batch)
             continue
         flat.extend(batch)
     flat.sort(key=lambda x: x["published"], reverse=True)

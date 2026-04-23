@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -51,19 +52,37 @@ CREATE TABLE IF NOT EXISTS feedback (
 """
 
 _initialized = False
+_shared_con: sqlite3.Connection | None = None
+_con_lock = threading.Lock()
+
+
+def _get_connection() -> sqlite3.Connection:
+    global _shared_con
+    if _shared_con is None:
+        _shared_con = sqlite3.connect(
+            STATE_DB_PATH, timeout=5.0, check_same_thread=False, isolation_level=None,
+        )
+        _shared_con.execute("PRAGMA journal_mode=WAL")
+        _shared_con.execute("PRAGMA synchronous=NORMAL")
+    return _shared_con
 
 
 @contextmanager
 def _conn():
-    """SQLite connection with a lock timeout. The `timeout=5.0` tells SQLite
-    to wait up to 5s for a competing writer to release the lock (under WAL,
-    with the brief writer windows we have, this is effectively never hit)."""
-    con = sqlite3.connect(STATE_DB_PATH, timeout=5.0)
-    try:
-        yield con
-        con.commit()
-    finally:
-        con.close()
+    """Yield the shared SQLite connection under a thread lock.
+
+    isolation_level=None puts us in autocommit; we wrap each block in BEGIN/COMMIT
+    so multiple statements in the same block are atomic.
+    """
+    con = _get_connection()
+    with _con_lock:
+        con.execute("BEGIN")
+        try:
+            yield con
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
 
 
 def init() -> None:
@@ -73,10 +92,9 @@ def init() -> None:
     parent = os.path.dirname(os.path.abspath(STATE_DB_PATH))
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with _conn() as con:
+    con = _get_connection()
+    with _con_lock:
         con.executescript(_SCHEMA)
-        con.execute("PRAGMA journal_mode=WAL")
-        # ALTER for feedback columns added after initial release.
         for col in ("title", "excerpt", "extended_summary"):
             try:
                 con.execute(f"ALTER TABLE feedback ADD COLUMN {col} TEXT")
@@ -84,7 +102,7 @@ def init() -> None:
                 pass  # already exists
     _migrate_from_json()
     _initialized = True
-    logger.info("Storage inizializzato: %s", STATE_DB_PATH)
+    logger.info("Storage initialized: %s", STATE_DB_PATH)
 
 
 def _migrate_from_json() -> None:
@@ -113,7 +131,7 @@ def _migrate_from_json() -> None:
             )
             migrated += cur.rowcount
     if migrated:
-        logger.info("Migrate: %d entry importate da %s", migrated, LEGACY_STATE_FILE)
+        logger.info("Migrate: %d entries imported from %s", migrated, LEGACY_STATE_FILE)
     try:
         os.rename(LEGACY_STATE_FILE, LEGACY_STATE_FILE + ".migrated")
     except OSError:

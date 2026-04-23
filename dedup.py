@@ -94,14 +94,3 @@ def get_posted_urls() -> set[str]:
     return storage.get_posted_urls()
 
 
-def mark_seen(items: list[dict]) -> None:
-    storage.prune()
-    enriched = []
-    for item in items:
-        enriched.append({
-            "url": item.get("url"),
-            "title_norm": item.get("title_norm") or normalize_title(item.get("title", "")),
-            "embedding": item.get("embedding"),
-            "source": item.get("source", ""),
-        })
-    storage.mark_posted(enriched)

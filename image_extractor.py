@@ -131,7 +131,7 @@ async def from_og(session: aiohttp.ClientSession, page_url: str, cache: dict) ->
                     return None
                 html = await resp.text(errors="ignore")
     except Exception as e:
-        logger.debug("og:image fetch fallito per %s: %s", page_url, e)
+        logger.debug("og:image fetch failed for %s: %s", page_url, e)
         cache[cache_key] = None
         return None
 
@@ -149,7 +149,7 @@ async def from_og(session: aiohttp.ClientSession, page_url: str, cache: dict) ->
                 cache[cache_key] = resolved
                 return resolved
     except Exception as e:
-        logger.debug("parse og:image fallito per %s: %s", page_url, e)
+        logger.debug("parse og:image failed for %s: %s", page_url, e)
 
     cache[cache_key] = None
     return None

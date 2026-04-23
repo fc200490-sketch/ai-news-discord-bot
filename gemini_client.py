@@ -21,6 +21,6 @@ def get_client():
         _client = genai.Client(api_key=GEMINI_API_KEY)
         return _client
     except Exception as e:
-        logger.warning("Gemini client non inizializzato: %s", e)
+        logger.warning("Gemini client not initialized: %s", e)
         _failed = True
         return None

@@ -139,8 +139,8 @@ async def _run(title: str, excerpt: str, extended: bool) -> str | None:
     user_prompt = _build_user_prompt(title, excerpt)
     sem = _get_semaphore()
 
-    async with sem:
-        for attempt in (1, 2):
+    for attempt in (1, 2):
+        async with sem:
             await _rate_gate(extended)
             try:
                 response = await asyncio.to_thread(
@@ -151,25 +151,22 @@ async def _run(title: str, excerpt: str, extended: bool) -> str | None:
                 text = _post_process(getattr(response, "text", "") or "", max_chars)
                 if text:
                     logger.info(
-                        "Riassunto %s generato (%s, %d char)",
-                        "esteso" if extended else "breve", GEMINI_MODEL, len(text),
+                        "Summary %s generated (%s, %d chars)",
+                        "extended" if extended else "short", GEMINI_MODEL, len(text),
                     )
                     return text
-                logger.warning("Gemini output vuoto (tentativo %d)", attempt)
+                logger.warning("Gemini empty output (attempt %d)", attempt)
                 backoff = 2
             except Exception as e:
                 msg = str(e)
-                # Adaptive backoff: rate-limit errors need a longer cooldown than
-                # transient failures, otherwise we burn the second retry on the
-                # same quota.
                 if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
                     backoff = 45
-                    logger.warning("Gemini rate-limit (tentativo %d): %s", attempt, e)
+                    logger.warning("Gemini rate-limit (attempt %d): %s", attempt, e)
                 else:
                     backoff = 2
-                    logger.warning("Gemini summarize fallito (tentativo %d): %s", attempt, e)
-            if attempt == 1:
-                await asyncio.sleep(backoff)
+                    logger.warning("Gemini summarize failed (attempt %d): %s", attempt, e)
+        if attempt == 1:
+            await asyncio.sleep(backoff)
     return None
 
 

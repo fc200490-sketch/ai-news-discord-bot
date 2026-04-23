@@ -48,16 +48,16 @@ try:
 except ValueError:
     sys.exit("ERROR: DISCORD_CHANNEL_ID deve essere un intero (ID numerico del canale).")
 
-FETCH_INTERVAL_HOURS = 12
-LOOKBACK_HOURS = 12
+FETCH_INTERVAL_HOURS = _env_int("FETCH_INTERVAL_HOURS", 12)
+LOOKBACK_HOURS = _env_int("LOOKBACK_HOURS", 12)
 # Optional: "HH:MM,HH:MM" in UTC. If set, overrides FETCH_INTERVAL_HOURS and the
 # bot publishes at those fixed wall-clock times each day.
 FETCH_TIMES_UTC = os.getenv("FETCH_TIMES_UTC", "").strip()
 STATE_DB_PATH = os.getenv("STATE_DB_PATH", "state.db").strip() or "state.db"
 LEGACY_STATE_FILE = "posted_urls.json"
 FEED_CACHE_FILE = os.getenv("FEED_CACHE_FILE", ".feed_cache.json").strip() or ".feed_cache.json"
-STATE_TTL_DAYS = 14
-FEEDBACK_TTL_DAYS = 45
+STATE_TTL_DAYS = _env_int("STATE_TTL_DAYS", 14)
+FEEDBACK_TTL_DAYS = _env_int("FEEDBACK_TTL_DAYS", 45)
 RATE_LIMIT_SECONDS = _env_float("RATE_LIMIT_SECONDS", 1.5)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or None

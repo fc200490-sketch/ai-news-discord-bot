@@ -70,20 +70,11 @@ READMORE_CUSTOM_ID = "news:readmore"
 
 
 class ReadMoreView(discord.ui.View):
-    """Persistent view. Link button has a dynamic URL (no callback needed, so
-    it survives restarts by being rendered client-side). The "Leggi di più"
-    button uses a static custom_id and looks up title/excerpt from storage on
-    click, so it also works across restarts."""
+    """Persistent view with a single "Leggi di più" button backed by a static
+    custom_id. The article link is already reachable via the embed title."""
 
     def __init__(self, item: dict | None = None):
         super().__init__(timeout=None)
-        if item is not None:
-            link_btn = discord.ui.Button(
-                label="Apri articolo",
-                style=discord.ButtonStyle.link,
-                url=item["url"],
-            )
-            self.add_item(link_btn)
 
     @discord.ui.button(
         label="Leggi di più",
@@ -124,7 +115,7 @@ class ReadMoreView(discord.ui.View):
             try:
                 storage.set_extended_summary(msg_id, text)
             except Exception as e:
-                logger.debug("Cache extended_summary fallito: %s", e)
+                logger.debug("Cache extended_summary failed: %s", e)
         text = text or excerpt or "Nessun dettaglio disponibile."
         await interaction.followup.send(content=_truncate(text, 1800), ephemeral=True)
 
@@ -182,7 +173,7 @@ async def _send_one(
     try:
         msg = await target.send(embed=embed, view=view) if view else await target.send(embed=embed)
     except discord.DiscordException as e:
-        logger.error("Invio fallito per %s: %s", item.get("url"), e)
+        logger.error("Send failed for %s: %s", item.get("url"), e)
         return None
     # Persist BEFORE any awaitable work: register + mark_posted are synchronous
     # SQLite calls, so no CancelledError can sneak in between target.send and
@@ -194,7 +185,7 @@ async def _send_one(
             excerpt=item.get("summary") or "",
         )
     except Exception as e:
-        logger.warning("register_message fallito per %s: %s", msg.id, e)
+        logger.warning("register_message failed for %s: %s", msg.id, e)
     try:
         storage.mark_posted([{
             "url": item["url"],
@@ -203,7 +194,7 @@ async def _send_one(
             "source": item.get("source", ""),
         }])
     except Exception as e:
-        logger.warning("mark_posted per-item fallito per %s: %s", msg.id, e)
+        logger.warning("mark_posted per-item failed for %s: %s", msg.id, e)
     # Reactions are a nice-to-have; failures (including cancellation) don't
     # roll back the already-persisted post.
     if ENABLE_REACTION_FEEDBACK:
@@ -211,7 +202,7 @@ async def _send_one(
             await msg.add_reaction(FEEDBACK_UP)
             await msg.add_reaction(FEEDBACK_DOWN)
         except Exception as e:
-            logger.debug("Reactions add fallito: %s", e)
+            logger.debug("Add reactions failed: %s", e)
     return msg
 
 
@@ -234,7 +225,7 @@ async def publish(channel: discord.abc.Messageable, items: list[dict]) -> list[d
                 auto_archive_duration=1440,
             )
         except discord.DiscordException as e:
-            logger.warning("Thread digest fallito, uso canale piatto: %s", e)
+            logger.warning("Thread digest failed, falling back to flat channel: %s", e)
             target = channel
 
     sent: list[dict] = []

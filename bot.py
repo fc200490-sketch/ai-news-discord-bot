@@ -29,7 +29,6 @@ from dedup import (
     find_semantic_duplicate,
     get_posted_urls,
     load_seen_recent,
-    mark_seen,
     normalize_title,
 )
 from discord_publisher import FEEDBACK_DOWN, FEEDBACK_UP, ReadMoreView, publish
@@ -49,8 +48,16 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 _last_news_now: dict[int, float] = {}
+_NEWS_NOW_GC_TTL_S = 3600.0
 _cycle_lock = asyncio.Lock()
 _commands_synced = False
+
+
+def _gc_news_now(now: float) -> None:
+    cutoff = now - _NEWS_NOW_GC_TTL_S
+    stale = [k for k, ts in _last_news_now.items() if ts < cutoff]
+    for k in stale:
+        _last_news_now.pop(k, None)
 
 ALL_SOURCE_NAMES = sorted(
     {n for n, *_ in FEEDS_EN} | {n for n, *_ in FEEDS_IT} | {ANTHROPIC_SOURCE}
@@ -70,7 +77,7 @@ async def _compute_embeddings(items: list[dict]) -> None:
         ok += 1
     failed = len(items) - ok
     if failed:
-        logger.warning("Embeddings: %d/%d OK, %d falliti", ok, len(items), failed)
+        logger.warning("Embeddings: %d/%d OK, %d failed", ok, len(items), failed)
     else:
         logger.info("Embeddings: %d/%d OK", ok, len(items))
 
@@ -110,7 +117,7 @@ def _semantic_group(candidates: list[dict]) -> list[dict]:
             DEDUP_WINDOW_HOURS,
         )
         if match:
-            logger.info("Scartato (già visto): %r ≈ %s", item["title"], match["url"])
+            logger.info("Dropped (already seen): %r ≈ %s", item["title"], match["url"])
             continue
 
         # vs kept intra-cycle: merge sources instead of discarding
@@ -127,7 +134,7 @@ def _semantic_group(candidates: list[dict]) -> list[dict]:
                 if src and src not in k["also_on"] and src != k.get("source"):
                     k["also_on"].append(src)
                 logger.info(
-                    "Raggruppato: %r da %s confluisce in %s",
+                    "Merged: %r from %s into %s",
                     item["title"], src, k["url"],
                 )
             continue
@@ -153,7 +160,7 @@ async def _attach_summaries(items: list[dict]) -> None:
     results = await asyncio.gather(*coros, return_exceptions=True)
     for item, res in zip(items, results):
         if isinstance(res, Exception):
-            logger.warning("Summarize eccezione per %s: %s", item.get("url"), res)
+            logger.warning("Summarize exception for %s: %s", item.get("url"), res)
             continue
         if res:
             item["summary_ai"] = res
@@ -165,17 +172,17 @@ async def run_cycle(channel: discord.abc.Messageable) -> dict:
         try:
             items = await fetch_all()
         except Exception as e:
-            logger.exception("Errore durante il fetch: %s", e)
+            logger.exception("Fetch error: %s", e)
             return {"error": str(e), "sent": 0}
 
         channel_id = getattr(channel, "id", 0)
         candidates = _prefilter(items, channel_id)
-        logger.info("%d fetched → %d dopo URL/mute prefilter", len(items), len(candidates))
+        logger.info("%d fetched → %d after URL/mute prefilter", len(items), len(candidates))
 
         await _compute_embeddings(candidates)
 
         fresh = _semantic_group(candidates)
-        logger.info("%d candidates → %d dopo dedup/grouping", len(candidates), len(fresh))
+        logger.info("%d candidates → %d after dedup/grouping", len(candidates), len(fresh))
 
         if not fresh:
             return {"fetched": len(items), "sent": 0}
@@ -186,11 +193,11 @@ async def run_cycle(channel: discord.abc.Messageable) -> dict:
         try:
             sent = await publish(channel, fresh)
         finally:
-            # Mark whatever was published, even if publish was interrupted,
-            # so we don't re-post on next cycle.
-            if sent:
-                mark_seen(sent)
-        logger.info("Ciclo: pubblicate %d/%d", len(sent), len(fresh))
+            try:
+                storage.prune()
+            except Exception as e:
+                logger.debug("Prune failed: %s", e)
+        logger.info("Cycle: published %d/%d", len(sent), len(fresh))
         return {"fetched": len(items), "kept": len(fresh), "sent": len(sent)}
 
 
@@ -204,28 +211,33 @@ def _parse_fetch_times(raw: str) -> list[dtime]:
             hh, mm = chunk.split(":")
             times.append(dtime(int(hh), int(mm), tzinfo=timezone.utc))
         except (ValueError, TypeError):
-            logger.warning("FETCH_TIMES_UTC: ignoro valore invalido %r", chunk)
+            logger.warning("FETCH_TIMES_UTC: ignoring invalid value %r", chunk)
     return times
 
 
 async def _do_news_cycle() -> None:
-    try:
-        channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
-    except discord.DiscordException as e:
-        logger.error("Canale non raggiungibile: %s", e)
+    channel = client.get_channel(DISCORD_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(DISCORD_CHANNEL_ID)
+        except Exception as e:
+            logger.error("Channel unreachable: %s", e)
+            return
+    if channel is None:
+        logger.error("Channel %s not found", DISCORD_CHANNEL_ID)
         return
     await run_cycle(channel)
 
 
 _fixed_times = _parse_fetch_times(FETCH_TIMES_UTC)
 if _fixed_times:
-    logger.info("Scheduler wall-clock UTC: %s", [t.isoformat() for t in _fixed_times])
+    logger.info("Scheduler wall-clock UTC: %s", [t.isoformat() for t in _fixed_times])  # noqa: E501
     news_cycle = tasks.loop(time=_fixed_times)(_do_news_cycle)
 else:
     if FETCH_TIMES_UTC.strip():
         logger.warning(
-            "FETCH_TIMES_UTC=%r non contiene valori HH:MM validi, "
-            "fallback a intervallo ogni %d ore.", FETCH_TIMES_UTC, FETCH_INTERVAL_HOURS,
+            "FETCH_TIMES_UTC=%r contains no valid HH:MM values, "
+            "falling back to %d-hour interval.", FETCH_TIMES_UTC, FETCH_INTERVAL_HOURS,
         )
     news_cycle = tasks.loop(hours=FETCH_INTERVAL_HOURS)(_do_news_cycle)
 
@@ -245,11 +257,17 @@ async def news_now(interaction: discord.Interaction):
         )
         return
     now = time.monotonic()
+    _gc_news_now(now)
     last = _last_news_now.get(interaction.channel_id or 0, 0.0)
     remaining = NEWS_NOW_COOLDOWN_SECONDS - (now - last)
     if remaining > 0:
         await interaction.response.send_message(
             f"Cooldown attivo: riprova tra {int(remaining)}s.", ephemeral=True,
+        )
+        return
+    if interaction.channel is None:
+        await interaction.response.send_message(
+            "Canale non disponibile.", ephemeral=True,
         )
         return
     _last_news_now[interaction.channel_id or 0] = now
@@ -265,7 +283,7 @@ async def news_now(interaction: discord.Interaction):
     try:
         await interaction.followup.send(summary, ephemeral=True)
     except discord.DiscordException as e:
-        logger.warning("Followup /news-now scaduto (%s); invio sul canale.", e)
+        logger.warning("Followup /news-now expired (%s); sending to channel.", e)
         try:
             await interaction.channel.send(f"`/news-now` → {summary}")
         except discord.DiscordException:
@@ -385,7 +403,7 @@ _view_registered = False
 @client.event
 async def on_ready():
     global _commands_synced, _view_registered
-    logger.info("Bot connesso come %s (id=%s)", client.user, client.user.id)
+    logger.info("Bot connected as %s (id=%s)", client.user, client.user.id)
     if not _view_registered:
         client.add_view(ReadMoreView())
         _view_registered = True
@@ -395,18 +413,11 @@ async def on_ready():
     )
     if not _commands_synced:
         try:
-            channel = client.get_channel(DISCORD_CHANNEL_ID) or await client.fetch_channel(DISCORD_CHANNEL_ID)
-            guild = getattr(channel, "guild", None)
-            if guild is not None:
-                tree.copy_global_to(guild=guild)
-                synced = await tree.sync(guild=guild)
-                logger.info("Slash commands sincronizzate su %s: %d", guild.name, len(synced))
-            else:
-                synced = await tree.sync()
-                logger.info("Slash commands sincronizzate globalmente: %d", len(synced))
+            synced = await tree.sync()
+            logger.info("Slash commands synced globally: %d", len(synced))
             _commands_synced = True
         except Exception as e:
-            logger.warning("Sync slash commands fallita: %s", e)
+            logger.warning("Sync slash commands failed: %s", e)
     if not news_cycle.is_running():
         news_cycle.start()
 

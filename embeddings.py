@@ -1,8 +1,9 @@
 """Gemini embeddings for semantic dedup, with rate limiting and graceful fallback."""
 import asyncio
 import logging
-import math
 import time
+
+import numpy as np
 
 from config import (
     EMBEDDING_CONCURRENCY,
@@ -47,8 +48,8 @@ async def embed(text: str) -> list[float] | None:
     if client is None:
         return None
     sem = _get_semaphore()
-    async with sem:
-        for attempt in (1, 2):
+    for attempt in (1, 2):
+        async with sem:
             await _rate_gate()
             try:
                 resp = await asyncio.to_thread(
@@ -61,42 +62,32 @@ async def embed(text: str) -> list[float] | None:
                 msg = str(e)
                 if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
                     backoff = 45
-                    logger.warning("Embedding rate-limit (tentativo %d): %s", attempt, e)
+                    logger.warning("Embedding rate-limit (attempt %d): %s", attempt, e)
                 else:
                     backoff = 2
-                    logger.warning("Embedding fallito (tentativo %d): %s", attempt, e)
-                if attempt == 1:
-                    await asyncio.sleep(backoff)
-        return None
+                    logger.warning("Embedding failed (attempt %d): %s", attempt, e)
+        # Sleep OUTSIDE the semaphore so other coroutines can proceed.
+        if attempt == 1:
+            await asyncio.sleep(backoff)
+    return None
 
 
 def _extract_values(resp) -> list[float] | None:
     embs = getattr(resp, "embeddings", None)
     if embs:
-        first = embs[0]
-        values = getattr(first, "values", None) or getattr(first, "value", None)
+        values = getattr(embs[0], "values", None)
         if values:
             return list(values)
-    single = getattr(resp, "embedding", None)
-    if single:
-        values = getattr(single, "values", None) or getattr(single, "value", None)
-        if values:
-            return list(values)
-        if isinstance(single, list):
-            return list(single)
     return None
 
 
 def cosine(a: list[float] | None, b: list[float] | None) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
+    va = np.asarray(a, dtype=np.float32)
+    vb = np.asarray(b, dtype=np.float32)
+    na = float(np.linalg.norm(va))
+    nb = float(np.linalg.norm(vb))
     if na == 0.0 or nb == 0.0:
         return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
+    return float(np.dot(va, vb) / (na * nb))
