@@ -73,6 +73,7 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `/mute-source <source>` | Manage Server | Silenzia una fonte nel canale corrente |
 | `/unmute-source <source>` | Manage Server | Riattiva una fonte |
 | `/list-muted` | Tutti | Elenca le fonti silenziate |
+| `/stats` | Tutti | Classifica delle fonti per feedback 👍/👎 aggregato |
 
 ## Esecuzione locale
 ```bash

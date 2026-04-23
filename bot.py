@@ -222,6 +222,11 @@ if _fixed_times:
     logger.info("Scheduler wall-clock UTC: %s", [t.isoformat() for t in _fixed_times])
     news_cycle = tasks.loop(time=_fixed_times)(_do_news_cycle)
 else:
+    if FETCH_TIMES_UTC.strip():
+        logger.warning(
+            "FETCH_TIMES_UTC=%r non contiene valori HH:MM validi, "
+            "fallback a intervallo ogni %d ore.", FETCH_TIMES_UTC, FETCH_INTERVAL_HOURS,
+        )
     news_cycle = tasks.loop(hours=FETCH_INTERVAL_HOURS)(_do_news_cycle)
 
 
@@ -310,6 +315,29 @@ async def list_muted_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
         "Fonti silenziate:\n" + "\n".join(f"• {s}" for s in muted),
         ephemeral=True,
+    )
+
+
+@tree.command(name="stats", description="Mostra le statistiche 👍/👎 per fonte.")
+async def stats_cmd(interaction: discord.Interaction):
+    stats = storage.get_source_stats()
+    if not stats:
+        await interaction.response.send_message(
+            "Ancora nessun feedback registrato.", ephemeral=True,
+        )
+        return
+    # Sort by net score (up - down), then up count as tiebreak.
+    ranked = sorted(
+        stats.items(),
+        key=lambda kv: (kv[1]["up"] - kv[1]["down"], kv[1]["up"]),
+        reverse=True,
+    )
+    lines = [
+        f"• **{src}** — 👍 {v['up']} · 👎 {v['down']}  (net {v['up'] - v['down']:+d})"
+        for src, v in ranked[:20]
+    ]
+    await interaction.response.send_message(
+        "**Feedback per fonte**\n" + "\n".join(lines), ephemeral=True,
     )
 
 

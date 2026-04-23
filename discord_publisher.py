@@ -20,8 +20,17 @@ from feeds import is_priority
 
 logger = logging.getLogger(__name__)
 
-COLOR_EN = 0x3498DB
-COLOR_IT = 0x2ECC71
+COLOR_EN = 0x3498DB  # blue
+COLOR_IT = 0x2ECC71  # green
+COLOR_DEFAULT = 0x95A5A6  # grey
+_LANG_COLORS = {
+    "en": COLOR_EN,
+    "it": COLOR_IT,
+    "es": 0xE67E22,  # orange
+    "fr": 0x9B59B6,  # purple
+    "de": 0xF1C40F,  # yellow
+    "pt": 0x1ABC9C,  # teal
+}
 
 FEEDBACK_UP = "👍"
 FEEDBACK_DOWN = "👎"
@@ -121,7 +130,7 @@ class ReadMoreView(discord.ui.View):
 
 
 def build_embed(item: dict) -> discord.Embed:
-    color = COLOR_IT if item["language"] == "it" else COLOR_EN
+    color = _LANG_COLORS.get(item.get("language", ""), COLOR_DEFAULT)
     title = item["title"]
     if is_priority(title + " " + (item.get("summary") or "")):
         title = f"🔥 {title}"
@@ -147,7 +156,9 @@ def build_embed(item: dict) -> discord.Embed:
         )
 
     reading = _reading_time_minutes(item)
-    footer = f"{item['source']} · {item['language'].upper()} · ~{reading} min lettura"
+    # "TL;DR" because the count is on the embed description, not on the
+    # original article — avoid misleading the reader.
+    footer = f"{item['source']} · {item['language'].upper()} · ~{reading} min TL;DR"
     embed.set_footer(text=footer)
     return embed
 
