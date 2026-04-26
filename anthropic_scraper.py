@@ -6,7 +6,7 @@ in the same dict format as RSS items consumed by news_fetcher.
 import logging
 import re
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -17,12 +17,22 @@ logger = logging.getLogger(__name__)
 
 SOURCE_NAME = "Anthropic"
 NEWS_URL = "https://www.anthropic.com/news"
+BASE_URL = "https://www.anthropic.com"
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
-_DATE_RE = re.compile(r"^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}$")
+_DATE_RE = re.compile(r"^[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4}$")
 
 
 def _parse_date(text: str) -> datetime | None:
     text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        pass
     if not _DATE_RE.match(text):
         return None
     for fmt in ("%b %d, %Y", "%B %d, %Y"):
@@ -51,7 +61,7 @@ def _title_from_anchor(a) -> str | None:
 def _date_for_anchor(a):
     t = a.find("time")
     if t:
-        d = _parse_date(t.get_text(strip=True))
+        d = _parse_date(t.get("datetime", "")) or _parse_date(t.get_text(strip=True))
         if d:
             return d
     parent = a.parent
@@ -60,11 +70,23 @@ def _date_for_anchor(a):
             break
         t = parent.find("time")
         if t:
-            d = _parse_date(t.get_text(strip=True))
+            d = _parse_date(t.get("datetime", "")) or _parse_date(t.get_text(strip=True))
             if d:
                 return d
         parent = parent.parent
     return None
+
+
+def _news_url_from_href(href: str) -> str | None:
+    url = urljoin(BASE_URL, href)
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if parsed.netloc != "www.anthropic.com":
+        return None
+    if parsed.path in ("/news", "/news/") or not parsed.path.startswith("/news/"):
+        return None
+    return parsed._replace(fragment="").geturl()
 
 
 def _extract(html: str) -> list[dict]:
@@ -72,10 +94,10 @@ def _extract(html: str) -> list[dict]:
     seen: set[str] = set()
     items: list[dict] = []
     for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if not href.startswith("/news/") or href in ("/news/", "/news"):
+        url = _news_url_from_href(a["href"])
+        if not url:
             continue
-        if href in seen:
+        if url in seen:
             continue
         title = _title_from_anchor(a)
         if not title or len(title) < 5:
@@ -85,10 +107,10 @@ def _extract(html: str) -> list[dict]:
             continue
         excerpt_tag = a.find("p")
         excerpt = excerpt_tag.get_text(" ", strip=True) if excerpt_tag else ""
-        seen.add(href)
+        seen.add(url)
         items.append({
             "title": title,
-            "url": urljoin("https://www.anthropic.com", href),
+            "url": url,
             "summary": excerpt[:500],
             "source": SOURCE_NAME,
             "published": published,

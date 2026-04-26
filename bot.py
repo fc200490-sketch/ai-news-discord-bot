@@ -9,13 +9,16 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
+import ai_curator
 import ai_summarizer
 import embeddings
 import storage
 from config import (
+    AI_CURATION_MIN_SCORE,
     DEDUP_WINDOW_HOURS,
     DISCORD_CHANNEL_ID,
     DISCORD_TOKEN,
+    ENABLE_AI_CURATION,
     EMBEDDING_SIMILARITY_THRESHOLD,
     ENABLE_AI_SUMMARY,
     ENABLE_EMBEDDING_DEDUP,
@@ -23,6 +26,7 @@ from config import (
     ENABLE_SMART_DEDUP,
     FETCH_INTERVAL_HOURS,
     FETCH_TIMES_UTC,
+    GEMINI_API_KEY,
     NEWS_NOW_COOLDOWN_SECONDS,
     SIMILARITY_THRESHOLD,
     STATE_TTL_DAYS,
@@ -34,7 +38,7 @@ from dedup import (
     normalize_title,
 )
 from discord_publisher import FEEDBACK_DOWN, FEEDBACK_UP, ReadMoreView, publish
-from feeds import FEEDS_EN, FEEDS_IT
+from feeds import FEEDS_EN, FEEDS_IT, is_priority
 from news_fetcher import fetch_all
 from anthropic_scraper import SOURCE_NAME as ANTHROPIC_SOURCE
 
@@ -78,9 +82,36 @@ def _gc_news_now(now: float) -> None:
     for k in stale:
         _last_news_now.pop(k, None)
 
+
+def _setting_bool(raw: str | None, default: bool) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on", "si", "sì")
+
+
+def _effective_ai_curation_enabled() -> bool:
+    raw = storage.get_setting(SETTING_AI_CURATION_ENABLED)
+    if raw is None:
+        return ENABLE_AI_CURATION
+    return _setting_bool(raw, ENABLE_AI_CURATION) and GEMINI_API_KEY is not None
+
+
+def _effective_ai_curation_min_score() -> int:
+    raw = storage.get_setting(SETTING_AI_CURATION_MIN_SCORE)
+    if raw is None:
+        return AI_CURATION_MIN_SCORE
+    try:
+        return max(0, min(100, int(raw)))
+    except ValueError:
+        return AI_CURATION_MIN_SCORE
+
+
 ALL_SOURCE_NAMES = sorted(
     {n for n, *_ in FEEDS_EN} | {n for n, *_ in FEEDS_IT} | {ANTHROPIC_SOURCE}
 )
+OFFICIAL_SOURCES = {"OpenAI", "Google DeepMind", "Hugging Face", ANTHROPIC_SOURCE}
+SETTING_AI_CURATION_ENABLED = "ai_curation_enabled"
+SETTING_AI_CURATION_MIN_SCORE = "ai_curation_min_score"
 
 
 async def _compute_embeddings(items: list[dict]) -> None:
@@ -105,7 +136,7 @@ def _prefilter(fresh: list[dict], channel_id: int) -> list[dict]:
     """Cheap filters (URL dedup + muted sources) — run BEFORE expensive Gemini
     embedding calls so we don't spend quota on items we'll throw away."""
     posted_urls = get_posted_urls(window_hours=STATE_TTL_DAYS * 24)
-    muted = set(storage.list_muted_sources(channel_id))
+    muted = set(storage.list_muted_sources(channel_id)) | set(storage.list_global_muted_sources())
     candidates: list[dict] = []
     for item in fresh:
         if item["url"] in posted_urls:
@@ -172,17 +203,78 @@ def _semantic_group(candidates: list[dict]) -> list[dict]:
 async def _attach_summaries(items: list[dict]) -> None:
     if not ENABLE_AI_SUMMARY or not items:
         return
+    pending = [it for it in items if not it.get("summary_ai")]
+    if not pending:
+        return
     coros = [
         ai_summarizer.summarize(it["title"], it.get("summary", ""))
-        for it in items
+        for it in pending
     ]
     results = await asyncio.gather(*coros, return_exceptions=True)
-    for item, res in zip(items, results):
+    for item, res in zip(pending, results):
         if isinstance(res, Exception):
             logger.warning("Summarize exception for %s: %s", item.get("url"), res)
             continue
         if res:
             item["summary_ai"] = res
+
+
+def _sort_for_digest(items: list[dict]) -> list[dict]:
+    def key(item: dict):
+        text = item.get("title", "") + " " + (item.get("summary") or "")
+        published = item.get("published")
+        published_ts = published.timestamp() if hasattr(published, "timestamp") else 0.0
+        return (
+            int(item.get("curation_score") or 0),
+            1 if is_priority(text) else 0,
+            1 if item.get("source") in OFFICIAL_SOURCES else 0,
+            published_ts,
+        )
+
+    return sorted(items, key=key, reverse=True)
+
+
+async def _apply_ai_curation(items: list[dict]) -> list[dict]:
+    if not _effective_ai_curation_enabled() or not items:
+        return _sort_for_digest(items)
+    min_score = _effective_ai_curation_min_score()
+
+    results = await asyncio.gather(
+        *(ai_curator.curate(item) for item in items),
+        return_exceptions=True,
+    )
+    kept: list[dict] = []
+    curated = 0
+    dropped = 0
+    failed = 0
+
+    for item, res in zip(items, results):
+        if isinstance(res, Exception) or res is None:
+            failed += 1
+            kept.append(item)
+            continue
+
+        curated += 1
+        item["curation_score"] = res["score"]
+        if res.get("summary"):
+            item["summary_ai"] = res["summary"]
+        if res.get("reason"):
+            item["curation_reason"] = res["reason"]
+
+        if res["keep"] and res["score"] >= min_score:
+            kept.append(item)
+        else:
+            dropped += 1
+            logger.info(
+                "Dropped by curation score=%s keep=%s: %r",
+                res["score"], res["keep"], item.get("title", ""),
+            )
+
+    logger.info(
+        "Curation: %d evaluated, %d kept, %d dropped, %d fallback",
+        curated, len(kept), dropped, failed,
+    )
+    return _sort_for_digest(kept)
 
 
 async def run_cycle(channel: discord.abc.Messageable) -> dict:
@@ -206,6 +298,12 @@ async def run_cycle(channel: discord.abc.Messageable) -> dict:
 
         if not fresh:
             return {"fetched": len(items), "sent": 0}
+
+        fresh = await _apply_ai_curation(fresh)
+        logger.info("%d items after curation/sorting", len(fresh))
+
+        if not fresh:
+            return {"fetched": len(items), "kept": 0, "sent": 0}
 
         await _attach_summaries(fresh)
 
@@ -274,9 +372,19 @@ async def _before():
 
 # --- Slash commands ---
 
+def _has_manage_guild(interaction: discord.Interaction) -> bool:
+    return bool(interaction.user.guild_permissions.manage_guild if interaction.guild else False)
+
+
+def _format_source_list(sources: list[str]) -> str:
+    if not sources:
+        return "Nessuna."
+    return "\n".join(f"- {s}" for s in sources)
+
+
 @tree.command(name="news-now", description="Forza un ciclo di news immediato (admin).")
 async def news_now(interaction: discord.Interaction):
-    if not (interaction.user.guild_permissions.manage_guild if interaction.guild else False):
+    if not _has_manage_guild(interaction):
         await interaction.response.send_message(
             "Serve il permesso **Manage Server**.", ephemeral=True,
         )
@@ -328,35 +436,102 @@ async def _source_autocomplete(_interaction, current: str):
 @app_commands.describe(source="Nome esatto della fonte da silenziare")
 @app_commands.autocomplete(source=_source_autocomplete)
 async def mute_source_cmd(interaction: discord.Interaction, source: str):
-    if not (interaction.user.guild_permissions.manage_guild if interaction.guild else False):
+    if not _has_manage_guild(interaction):
         await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
         return
     storage.add_muted_source(interaction.channel_id or 0, source)
-    await interaction.response.send_message(f"🔇 `{source}` silenziata in questo canale.", ephemeral=True)
+    await interaction.response.send_message(f"`{source}` silenziata in questo canale.", ephemeral=True)
 
 
 @tree.command(name="unmute-source", description="Riattiva una fonte silenziata.")
 @app_commands.describe(source="Nome della fonte da riattivare")
 @app_commands.autocomplete(source=_source_autocomplete)
 async def unmute_source_cmd(interaction: discord.Interaction, source: str):
-    if not (interaction.user.guild_permissions.manage_guild if interaction.guild else False):
+    if not _has_manage_guild(interaction):
         await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
         return
     removed = storage.remove_muted_source(interaction.channel_id or 0, source)
     if removed:
-        await interaction.response.send_message(f"🔊 `{source}` riattivata.", ephemeral=True)
+        await interaction.response.send_message(f"`{source}` riattivata.", ephemeral=True)
     else:
         await interaction.response.send_message(f"`{source}` non era silenziata.", ephemeral=True)
 
 
+@tree.command(name="mute-source-global", description="Silenzia una fonte per tutto il bot.")
+@app_commands.describe(source="Nome esatto della fonte da silenziare globalmente")
+@app_commands.autocomplete(source=_source_autocomplete)
+async def mute_source_global_cmd(interaction: discord.Interaction, source: str):
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
+        return
+    storage.add_global_muted_source(source)
+    await interaction.response.send_message(f"`{source}` silenziata globalmente.", ephemeral=True)
+
+
+@tree.command(name="unmute-source-global", description="Riattiva una fonte silenziata globalmente.")
+@app_commands.describe(source="Nome della fonte da riattivare globalmente")
+@app_commands.autocomplete(source=_source_autocomplete)
+async def unmute_source_global_cmd(interaction: discord.Interaction, source: str):
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
+        return
+    removed = storage.remove_global_muted_source(source)
+    if removed:
+        await interaction.response.send_message(f"`{source}` riattivata globalmente.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"`{source}` non era silenziata globalmente.", ephemeral=True)
+
+
 @tree.command(name="list-muted", description="Mostra le fonti silenziate in questo canale.")
 async def list_muted_cmd(interaction: discord.Interaction):
-    muted = storage.list_muted_sources(interaction.channel_id or 0)
-    if not muted:
-        await interaction.response.send_message("Nessuna fonte silenziata.", ephemeral=True)
-        return
+    channel_muted = storage.list_muted_sources(interaction.channel_id or 0)
+    global_muted = storage.list_global_muted_sources()
     await interaction.response.send_message(
-        "Fonti silenziate:\n" + "\n".join(f"• {s}" for s in muted),
+        "**Globali**\n" + _format_source_list(global_muted) + "\n\n**Questo canale**\n" + _format_source_list(channel_muted),
+        ephemeral=True,
+    )
+
+
+@tree.command(name="curation-status", description="Mostra la configurazione globale della curatela AI.")
+async def curation_status_cmd(interaction: discord.Interaction):
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
+        return
+    enabled_override = storage.get_setting(SETTING_AI_CURATION_ENABLED)
+    score_override = storage.get_setting(SETTING_AI_CURATION_MIN_SCORE)
+    await interaction.response.send_message(
+        "**Curatela AI**\n"
+        f"- Attiva ora: {_effective_ai_curation_enabled()}\n"
+        f"- Default env: {ENABLE_AI_CURATION}\n"
+        f"- Override enabled: {enabled_override if enabled_override is not None else 'nessuno'}\n"
+        f"- Soglia attiva: {_effective_ai_curation_min_score()}\n"
+        f"- Soglia default env: {AI_CURATION_MIN_SCORE}\n"
+        f"- Override soglia: {score_override if score_override is not None else 'nessuno'}\n\n"
+        "**Fonti silenziate globalmente**\n"
+        + _format_source_list(storage.list_global_muted_sources()),
+        ephemeral=True,
+    )
+
+
+@tree.command(name="curation-set", description="Modifica la curatela AI globale.")
+@app_commands.describe(
+    enabled="Abilita o disabilita la curatela AI globale",
+    min_score="Score minimo 0-100 per pubblicare una news curata",
+)
+async def curation_set_cmd(
+    interaction: discord.Interaction,
+    enabled: bool,
+    min_score: app_commands.Range[int, 0, 100] | None = None,
+):
+    if not _has_manage_guild(interaction):
+        await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
+        return
+    storage.set_setting(SETTING_AI_CURATION_ENABLED, "true" if enabled else "false")
+    if min_score is not None:
+        storage.set_setting(SETTING_AI_CURATION_MIN_SCORE, str(int(min_score)))
+    await interaction.response.send_message(
+        f"Curatela AI {'attivata' if enabled else 'disattivata'}. "
+        f"Soglia attiva: {_effective_ai_curation_min_score()}.",
         ephemeral=True,
     )
 
@@ -498,8 +673,8 @@ async def on_ready():
         client.loop.create_task(_gateway_watchdog())
         _watchdog_started = True
     logger.info(
-        "Config: AI_SUMMARY=%s SMART_DEDUP=%s EMBEDDING_DEDUP=%s",
-        ENABLE_AI_SUMMARY, ENABLE_SMART_DEDUP, ENABLE_EMBEDDING_DEDUP,
+        "Config: AI_SUMMARY=%s AI_CURATION=%s SMART_DEDUP=%s EMBEDDING_DEDUP=%s",
+        ENABLE_AI_SUMMARY, ENABLE_AI_CURATION, ENABLE_SMART_DEDUP, ENABLE_EMBEDDING_DEDUP,
     )
     if not _commands_synced:
         try:

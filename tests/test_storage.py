@@ -63,6 +63,25 @@ def test_source_stats_clamp_at_zero():
     assert stats["SrcY"]["up"] == 0
 
 
+def test_global_muted_source_roundtrip():
+    storage.add_global_muted_source("GlobalSrc")
+    assert "GlobalSrc" in storage.list_global_muted_sources()
+    assert storage.remove_global_muted_source("GlobalSrc") is True
+    assert storage.remove_global_muted_source("GlobalSrc") is False
+    assert "GlobalSrc" not in storage.list_global_muted_sources()
+
+
+def test_bot_setting_roundtrip():
+    assert storage.get_setting("sample_key") is None
+    storage.set_setting("sample_key", "42")
+    assert storage.get_setting("sample_key") == "42"
+    storage.set_setting("sample_key", "99")
+    assert storage.get_setting("sample_key") == "99"
+    assert storage.delete_setting("sample_key") is True
+    assert storage.delete_setting("sample_key") is False
+    assert storage.get_setting("sample_key") is None
+
+
 if __name__ == "__main__":
     test_mark_posted_and_get_urls()
     print("OK test_mark_posted_and_get_urls")
@@ -74,3 +93,7 @@ if __name__ == "__main__":
     print("OK test_register_and_get_message")
     test_source_stats_clamp_at_zero()
     print("OK test_source_stats_clamp_at_zero")
+    test_global_muted_source_roundtrip()
+    print("OK test_global_muted_source_roundtrip")
+    test_bot_setting_roundtrip()
+    print("OK test_bot_setting_roundtrip")

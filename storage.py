@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS muted_sources (
     PRIMARY KEY (channel_id, source)
 );
 
+CREATE TABLE IF NOT EXISTS global_muted_sources (
+    source TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS source_stats (
     source TEXT PRIMARY KEY,
     up INTEGER NOT NULL DEFAULT 0,
@@ -230,6 +239,55 @@ def list_muted_sources(channel_id: int) -> list[str]:
             (channel_id,),
         ).fetchall()
     return [r[0] for r in rows]
+
+
+def add_global_muted_source(source: str) -> None:
+    with _conn() as con:
+        con.execute(
+            "INSERT OR IGNORE INTO global_muted_sources(source) VALUES (?)",
+            (source,),
+        )
+
+
+def remove_global_muted_source(source: str) -> bool:
+    with _conn() as con:
+        cur = con.execute(
+            "DELETE FROM global_muted_sources WHERE source = ?",
+            (source,),
+        )
+        return cur.rowcount > 0
+
+
+def list_global_muted_sources() -> list[str]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT source FROM global_muted_sources ORDER BY source"
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def get_setting(key: str) -> str | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT value FROM bot_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with _conn() as con:
+        con.execute(
+            "INSERT INTO bot_settings(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def delete_setting(key: str) -> bool:
+    with _conn() as con:
+        cur = con.execute("DELETE FROM bot_settings WHERE key = ?", (key,))
+        return cur.rowcount > 0
 
 
 def register_message(

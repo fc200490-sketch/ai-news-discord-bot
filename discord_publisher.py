@@ -138,6 +138,14 @@ def build_embed(item: dict) -> discord.Embed:
     if thumbnail:
         embed.set_image(url=thumbnail)
 
+    curation_reason = item.get("curation_reason")
+    if curation_reason:
+        embed.add_field(
+            name="Perché conta",
+            value=_truncate(curation_reason, 300),
+            inline=False,
+        )
+
     also_on = item.get("also_on") or []
     if also_on:
         embed.add_field(

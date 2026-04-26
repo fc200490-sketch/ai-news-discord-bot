@@ -2,6 +2,7 @@
 import os
 import sys
 import tempfile
+import asyncio
 from datetime import datetime, timezone
 
 os.environ.setdefault("DISCORD_TOKEN", "x")
@@ -17,7 +18,8 @@ if os.path.exists(os.environ["STATE_DB_PATH"]):
     os.remove(os.environ["STATE_DB_PATH"])
 storage.init()
 
-from bot import _prefilter, _semantic_group  # noqa: E402
+import bot  # noqa: E402
+from bot import _apply_ai_curation, _prefilter, _semantic_group, _sort_for_digest  # noqa: E402
 
 
 def _item(title: str, url: str, source: str = "TestSrc", lang: str = "en") -> dict:
@@ -50,6 +52,18 @@ def test_prefilter_drops_muted_source():
     assert "OK" in sources
 
 
+def test_prefilter_drops_global_muted_source():
+    storage.add_global_muted_source("GlobalBanned")
+    fresh = [
+        _item("A", "https://global/1", source="GlobalBanned"),
+        _item("B", "https://global/2", source="OK"),
+    ]
+    out = _prefilter(fresh, channel_id=999)
+    sources = [i["source"] for i in out]
+    assert "GlobalBanned" not in sources
+    assert "OK" in sources
+
+
 def test_semantic_group_merges_duplicates_intra_cycle():
     # Lexical fallback threshold is 0.82; use near-identical titles.
     a = _item("OpenAI releases new GPT-5 model today", "https://c/1", source="SrcA")
@@ -71,6 +85,121 @@ def test_semantic_group_keeps_unrelated():
     b["title_norm"] = normalize_title(b["title"])
     kept = _semantic_group([a, b])
     assert len(kept) == 2
+
+
+def test_ai_curation_drops_low_score_and_keeps_high_score():
+    async def fake_curate(item):
+        if "important" in item["title"].lower():
+            return {
+                "keep": True,
+                "score": 91,
+                "reason": "Important AI development.",
+                "summary": "Curated summary.",
+            }
+        return {
+            "keep": False,
+            "score": 30,
+            "reason": "Low relevance.",
+            "summary": "",
+        }
+
+    old_enabled = bot.ENABLE_AI_CURATION
+    old_curate = bot.ai_curator.curate
+    try:
+        bot.ENABLE_AI_CURATION = True
+        bot.ai_curator.curate = fake_curate
+        items = [
+            _item("Important AI agent launch", "https://e/1", source="OpenAI"),
+            _item("Generic gadget rumor", "https://e/2", source="Blog"),
+        ]
+        kept = asyncio.run(_apply_ai_curation(items))
+    finally:
+        bot.ENABLE_AI_CURATION = old_enabled
+        bot.ai_curator.curate = old_curate
+
+    assert len(kept) == 1
+    assert kept[0]["url"] == "https://e/1"
+    assert kept[0]["summary_ai"] == "Curated summary."
+    assert kept[0]["curation_reason"] == "Important AI development."
+
+
+def test_ai_curation_uses_runtime_min_score():
+    async def fake_curate(_item):
+        return {
+            "keep": True,
+            "score": 75,
+            "reason": "Useful but not critical.",
+            "summary": "Curated summary.",
+        }
+
+    old_enabled = bot.ENABLE_AI_CURATION
+    old_curate = bot.ai_curator.curate
+    old_key = bot.GEMINI_API_KEY
+    try:
+        bot.ENABLE_AI_CURATION = True
+        bot.GEMINI_API_KEY = "x"
+        bot.ai_curator.curate = fake_curate
+        storage.set_setting(bot.SETTING_AI_CURATION_MIN_SCORE, "80")
+        kept = asyncio.run(_apply_ai_curation([_item("Medium score", "https://score/1")]))
+    finally:
+        bot.ENABLE_AI_CURATION = old_enabled
+        bot.GEMINI_API_KEY = old_key
+        bot.ai_curator.curate = old_curate
+        storage.delete_setting(bot.SETTING_AI_CURATION_MIN_SCORE)
+
+    assert kept == []
+
+
+def test_ai_curation_runtime_disabled_skips_curator():
+    async def fail_if_called(_item):
+        raise AssertionError("curator should not be called")
+
+    old_enabled = bot.ENABLE_AI_CURATION
+    old_curate = bot.ai_curator.curate
+    old_key = bot.GEMINI_API_KEY
+    try:
+        bot.ENABLE_AI_CURATION = True
+        bot.GEMINI_API_KEY = "x"
+        bot.ai_curator.curate = fail_if_called
+        storage.set_setting(bot.SETTING_AI_CURATION_ENABLED, "false")
+        items = [_item("Runtime disabled", "https://disabled/1")]
+        kept = asyncio.run(_apply_ai_curation(items))
+    finally:
+        bot.ENABLE_AI_CURATION = old_enabled
+        bot.GEMINI_API_KEY = old_key
+        bot.ai_curator.curate = old_curate
+        storage.delete_setting(bot.SETTING_AI_CURATION_ENABLED)
+
+    assert len(kept) == 1
+    assert kept[0]["url"] == "https://disabled/1"
+
+
+def test_ai_curation_fallback_keeps_items_when_curator_fails():
+    async def fake_curate(_item):
+        return None
+
+    old_enabled = bot.ENABLE_AI_CURATION
+    old_curate = bot.ai_curator.curate
+    try:
+        bot.ENABLE_AI_CURATION = True
+        bot.ai_curator.curate = fake_curate
+        items = [_item("Fallback item", "https://f/1")]
+        kept = asyncio.run(_apply_ai_curation(items))
+    finally:
+        bot.ENABLE_AI_CURATION = old_enabled
+        bot.ai_curator.curate = old_curate
+
+    assert len(kept) == 1
+    assert kept[0]["url"] == "https://f/1"
+
+
+def test_sort_for_digest_prioritizes_score_over_freshness():
+    older_high = _item("Important model launch", "https://g/1", source="OpenAI")
+    newer_low = _item("Minor update", "https://g/2", source="Blog")
+    older_high["curation_score"] = 92
+    newer_low["curation_score"] = 71
+    ordered = _sort_for_digest([newer_low, older_high])
+    assert ordered[0]["url"] == "https://g/1"
 
 
 if __name__ == "__main__":

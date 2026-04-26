@@ -4,8 +4,9 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 
 ## Features
 - RSS feed curati (EN + IT) con retry automatico + caching ETag/Last-Modified
+- Curatela AI del digest: Gemini valuta rilevanza, score e motivo editoriale
 - Riassunti AI uniformi (lingua configurabile, default IT) via Gemini (free tier)
-- **Dedup semantica via embedding** (Gemini `text-embedding-004`, cosine similarity) + fallback SequenceMatcher
+- **Dedup semantica via embedding** (Gemini `gemini-embedding-001`, cosine similarity) + fallback SequenceMatcher
 - **Grouping multi-fonte**: duplicati intra-ciclo si uniscono in un unico embed con `Anche su: …`
 - **Stato persistente in SQLite** (`state.db`) — sopravvive ai redeploy se il volume è persistente
 - **Digest + thread**: ogni ciclo apre un thread, le news finiscono dentro (canale pulito)
@@ -13,6 +14,7 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 - **Tempo di lettura stimato** nel footer dell'embed
 - **Button "Leggi di più"** con riassunto esteso (ephemeral, solo per chi clicca)
 - **Slash commands**: `/news-now`, `/mute-source`, `/unmute-source`, `/list-muted`
+- **Admin runtime config**: curatela AI e mute globali modificabili da Discord
 - **Reactions 👍/👎** come feedback per fonte (aggregate in `source_stats`)
 - Thumbnail/immagini negli embed (media:thumbnail o og:image)
 - Filtro keyword AI (regex word-boundary) su feed italiani generalisti
@@ -47,6 +49,10 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `STATE_DB_PATH` | `state.db` | Path SQLite (su Railway/Fly punta al volume) |
 | `FETCH_TIMES_UTC` | — | Opzionale: `HH:MM,HH:MM` UTC. Se impostato, sovrascrive l'intervallo di 12h con orari fissi (es. `07:00,19:00`). |
 | `ENABLE_AI_SUMMARY` | `true` | Attiva riassunti AI |
+| `ENABLE_AI_CURATION` | `true` | Attiva filtro editoriale AI-assisted prima della pubblicazione |
+| `AI_CURATION_MIN_SCORE` | `70` | Score minimo per pubblicare una news valutata dalla curatela |
+| `AI_CURATION_CONCURRENCY` | `1` | Chiamate Gemini di curatela in parallelo |
+| `AI_CURATION_MIN_INTERVAL_SECONDS` | `13.0` | Intervallo minimo tra chiamate di curatela |
 | `ENABLE_SMART_DEDUP` | `true` | Attiva dedup semantica |
 | `ENABLE_EMBEDDING_DEDUP` | `true` | Usa embedding (altrimenti solo lessicale) |
 | `ENABLE_THUMBNAILS` | `true` | Attiva estrazione og:image |
@@ -77,8 +83,16 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 | `/news-now` | Manage Server | Forza un ciclo immediato (cooldown 5 min) |
 | `/mute-source <source>` | Manage Server | Silenzia una fonte nel canale corrente |
 | `/unmute-source <source>` | Manage Server | Riattiva una fonte |
-| `/list-muted` | Tutti | Elenca le fonti silenziate |
+| `/mute-source-global <source>` | Manage Server | Silenzia una fonte per tutto il bot |
+| `/unmute-source-global <source>` | Manage Server | Riattiva una fonte silenziata globalmente |
+| `/list-muted` | Tutti | Elenca fonti silenziate globalmente e nel canale |
+| `/curation-status` | Manage Server | Mostra stato curatela AI, soglia attiva e mute globali |
+| `/curation-set <enabled> [min_score]` | Manage Server | Modifica curatela AI globale e soglia 0-100 |
 | `/stats` | Tutti | Metriche runtime (uptime, cicli, notizie pubblicate, errori) + classifica feedback 👍/👎 per fonte |
+
+Le impostazioni modificate da Discord sono globali per il bot e persistono in
+SQLite (`state.db`). Se il deploy non usa un volume persistente, tornano ai
+default `.env` dopo il redeploy.
 
 ## Esecuzione locale
 ```bash
@@ -114,14 +128,18 @@ fly deploy
 
 ## Test
 ```bash
-python tests/test_dedup.py
+.venv\Scripts\python.exe run_tests.py
 ```
+
+Su Windows usa il Python della `.venv`: il `python` globale potrebbe non avere
+le dipendenze di `requirements.txt` installate.
 
 ## Struttura
 ```
 bot.py                # Entry point + scheduler + slash commands + reactions
 news_fetcher.py       # Fetch RSS + retry/ETag + filtro date/keyword regex
 ai_summarizer.py      # Riassunti Gemini (breve + esteso) + prompt-injection hardening
+ai_curator.py         # Curatela AI: keep/score/reason/summary per digest
 embeddings.py         # Wrapper Gemini embeddings + cosine similarity
 dedup.py              # Semantic dedup (embedding + fallback lessicale)
 storage.py            # SQLite: posted, muted_sources, source_stats, feedback
@@ -129,6 +147,7 @@ image_extractor.py    # Thumbnail da media:thumbnail / og:image
 discord_publisher.py  # Digest + thread + embed + button + reactions
 feeds.py              # Lista feed + AI_KEYWORDS + PRIORITY_KEYWORDS
 config.py             # Variabili ambiente
+run_tests.py          # Runner locale senza dipendenze aggiuntive
 tests/                # Unit test base (dedup, embeddings, priority)
 ```
 
