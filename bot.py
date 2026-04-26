@@ -86,7 +86,12 @@ def _gc_news_now(now: float) -> None:
 def _setting_bool(raw: str | None, default: bool) -> bool:
     if raw is None:
         return default
-    return raw.strip().lower() in ("1", "true", "yes", "y", "on", "si", "sì")
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "y", "on", "si", "sì"):
+        return True
+    if value in ("0", "false", "no", "n", "off"):
+        return False
+    return default
 
 
 def _effective_ai_curation_enabled() -> bool:
@@ -99,11 +104,11 @@ def _effective_ai_curation_enabled() -> bool:
 def _effective_ai_curation_min_score() -> int:
     raw = storage.get_setting(SETTING_AI_CURATION_MIN_SCORE)
     if raw is None:
-        return AI_CURATION_MIN_SCORE
+        return max(0, min(100, AI_CURATION_MIN_SCORE))
     try:
         return max(0, min(100, int(raw)))
     except ValueError:
-        return AI_CURATION_MIN_SCORE
+        return max(0, min(100, AI_CURATION_MIN_SCORE))
 
 
 ALL_SOURCE_NAMES = sorted(
@@ -379,7 +384,27 @@ def _has_manage_guild(interaction: discord.Interaction) -> bool:
 def _format_source_list(sources: list[str]) -> str:
     if not sources:
         return "Nessuna."
-    return "\n".join(f"- {s}" for s in sources)
+    return "\n".join(f"- {discord.utils.escape_markdown(s)}" for s in sources)
+
+
+def _resolve_source_name(source: str) -> str | None:
+    requested = (source or "").strip()
+    if not requested:
+        return None
+    exact = {s: s for s in ALL_SOURCE_NAMES}
+    if requested in exact:
+        return exact[requested]
+    requested_folded = requested.casefold()
+    folded = {s.casefold(): s for s in ALL_SOURCE_NAMES}
+    return folded.get(requested_folded)
+
+
+async def _send_invalid_source(interaction: discord.Interaction, source: str) -> None:
+    await interaction.response.send_message(
+        f"Fonte non valida: `{discord.utils.escape_markdown((source or '').strip())}`. "
+        "Usa l'autocomplete del comando.",
+        ephemeral=True,
+    )
 
 
 @tree.command(name="news-now", description="Forza un ciclo di news immediato (admin).")
@@ -439,8 +464,12 @@ async def mute_source_cmd(interaction: discord.Interaction, source: str):
     if not _has_manage_guild(interaction):
         await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
         return
-    storage.add_muted_source(interaction.channel_id or 0, source)
-    await interaction.response.send_message(f"`{source}` silenziata in questo canale.", ephemeral=True)
+    canonical = _resolve_source_name(source)
+    if canonical is None:
+        await _send_invalid_source(interaction, source)
+        return
+    storage.add_muted_source(interaction.channel_id or 0, canonical)
+    await interaction.response.send_message(f"`{canonical}` silenziata in questo canale.", ephemeral=True)
 
 
 @tree.command(name="unmute-source", description="Riattiva una fonte silenziata.")
@@ -450,11 +479,15 @@ async def unmute_source_cmd(interaction: discord.Interaction, source: str):
     if not _has_manage_guild(interaction):
         await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
         return
-    removed = storage.remove_muted_source(interaction.channel_id or 0, source)
+    canonical = _resolve_source_name(source)
+    if canonical is None:
+        await _send_invalid_source(interaction, source)
+        return
+    removed = storage.remove_muted_source(interaction.channel_id or 0, canonical)
     if removed:
-        await interaction.response.send_message(f"`{source}` riattivata.", ephemeral=True)
+        await interaction.response.send_message(f"`{canonical}` riattivata.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"`{source}` non era silenziata.", ephemeral=True)
+        await interaction.response.send_message(f"`{canonical}` non era silenziata.", ephemeral=True)
 
 
 @tree.command(name="mute-source-global", description="Silenzia una fonte per tutto il bot.")
@@ -464,8 +497,12 @@ async def mute_source_global_cmd(interaction: discord.Interaction, source: str):
     if not _has_manage_guild(interaction):
         await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
         return
-    storage.add_global_muted_source(source)
-    await interaction.response.send_message(f"`{source}` silenziata globalmente.", ephemeral=True)
+    canonical = _resolve_source_name(source)
+    if canonical is None:
+        await _send_invalid_source(interaction, source)
+        return
+    storage.add_global_muted_source(canonical)
+    await interaction.response.send_message(f"`{canonical}` silenziata globalmente.", ephemeral=True)
 
 
 @tree.command(name="unmute-source-global", description="Riattiva una fonte silenziata globalmente.")
@@ -475,11 +512,15 @@ async def unmute_source_global_cmd(interaction: discord.Interaction, source: str
     if not _has_manage_guild(interaction):
         await interaction.response.send_message("Serve il permesso **Manage Server**.", ephemeral=True)
         return
-    removed = storage.remove_global_muted_source(source)
+    canonical = _resolve_source_name(source)
+    if canonical is None:
+        await _send_invalid_source(interaction, source)
+        return
+    removed = storage.remove_global_muted_source(canonical)
     if removed:
-        await interaction.response.send_message(f"`{source}` riattivata globalmente.", ephemeral=True)
+        await interaction.response.send_message(f"`{canonical}` riattivata globalmente.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"`{source}` non era silenziata globalmente.", ephemeral=True)
+        await interaction.response.send_message(f"`{canonical}` non era silenziata globalmente.", ephemeral=True)
 
 
 @tree.command(name="list-muted", description="Mostra le fonti silenziate in questo canale.")

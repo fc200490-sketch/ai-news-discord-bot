@@ -9,7 +9,6 @@ from json import JSONDecodeError
 from config import (
     AI_CURATION_CONCURRENCY,
     AI_CURATION_MIN_INTERVAL_SECONDS,
-    ENABLE_AI_CURATION,
     GEMINI_MODEL,
     SUMMARY_LANGUAGE,
 )
@@ -143,8 +142,6 @@ def _user_prompt(item: dict) -> str:
 
 
 async def curate(item: dict) -> dict | None:
-    if not ENABLE_AI_CURATION:
-        return None
     client = get_client()
     if client is None:
         return None

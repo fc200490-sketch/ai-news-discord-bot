@@ -1,10 +1,12 @@
 """SQLite-backed persistent state.
 
 Tables:
-  posted         — URL history with ts, title_norm, embedding (JSON), source.
-  muted_sources  — per-channel source mutes.
-  source_stats   — aggregate up/down counters from reaction feedback.
-  feedback       — message_id → url,source mapping for reaction handling.
+  posted                 - URL history with ts, title_norm, embedding, source.
+  muted_sources          - per-channel source mutes.
+  global_muted_sources   - bot-wide source mutes.
+  bot_settings           - runtime bot settings changed from Discord.
+  source_stats           - aggregate up/down counters from reaction feedback.
+  feedback               - message_id to url/source mapping for reactions.
 """
 import json
 import logging

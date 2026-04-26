@@ -13,7 +13,7 @@ Bot Discord che ogni 12 ore pubblica in un canale testuale le principali notizie
 - **Priority tag 🔥** per keyword ad alto impatto (launch, acquisition, funding, lawsuit, …)
 - **Tempo di lettura stimato** nel footer dell'embed
 - **Button "Leggi di più"** con riassunto esteso (ephemeral, solo per chi clicca)
-- **Slash commands**: `/news-now`, `/mute-source`, `/unmute-source`, `/list-muted`
+- **Slash commands**: `/news-now`, mute per-canale/globali, curation runtime, `/stats`
 - **Admin runtime config**: curatela AI e mute globali modificabili da Discord
 - **Reactions 👍/👎** come feedback per fonte (aggregate in `source_stats`)
 - Thumbnail/immagini negli embed (media:thumbnail o og:image)
@@ -142,7 +142,7 @@ ai_summarizer.py      # Riassunti Gemini (breve + esteso) + prompt-injection har
 ai_curator.py         # Curatela AI: keep/score/reason/summary per digest
 embeddings.py         # Wrapper Gemini embeddings + cosine similarity
 dedup.py              # Semantic dedup (embedding + fallback lessicale)
-storage.py            # SQLite: posted, muted_sources, source_stats, feedback
+storage.py            # SQLite: posted, mutes, runtime settings, stats, feedback
 image_extractor.py    # Thumbnail da media:thumbnail / og:image
 discord_publisher.py  # Digest + thread + embed + button + reactions
 feeds.py              # Lista feed + AI_KEYWORDS + PRIORITY_KEYWORDS

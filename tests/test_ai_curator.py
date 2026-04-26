@@ -1,6 +1,7 @@
 """Unit tests for AI curation response parsing."""
 import os
 import sys
+import asyncio
 
 os.environ.setdefault("DISCORD_TOKEN", "x")
 os.environ.setdefault("DISCORD_CHANNEL_ID", "1")
@@ -8,6 +9,19 @@ os.environ.setdefault("DISCORD_CHANNEL_ID", "1")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ai_curator  # noqa: E402
+
+
+class _FakeResponse:
+    text = '{"keep": true, "score": 88, "reason": "Relevant.", "summary": "Curated."}'
+
+
+class _FakeModels:
+    def generate_content(self, **_kwargs):
+        return _FakeResponse()
+
+
+class _FakeClient:
+    models = _FakeModels()
 
 
 def test_parse_valid_json():
@@ -40,6 +54,34 @@ def test_parse_clamps_score_and_defaults_keep_from_score():
 
 def test_parse_invalid_returns_none():
     assert ai_curator._parse_curation_response("not json") is None
+
+
+def test_curate_does_not_apply_env_flag_gate():
+    old_get_client = ai_curator.get_client
+    old_interval = ai_curator.AI_CURATION_MIN_INTERVAL_SECONDS
+    had_legacy_flag = hasattr(ai_curator, "ENABLE_AI_CURATION")
+    old_legacy_flag = getattr(ai_curator, "ENABLE_AI_CURATION", None)
+    try:
+        ai_curator.get_client = lambda: _FakeClient()
+        ai_curator.AI_CURATION_MIN_INTERVAL_SECONDS = 0
+        ai_curator.ENABLE_AI_CURATION = False
+        out = asyncio.run(ai_curator.curate({
+            "source": "OpenAI",
+            "language": "en",
+            "title": "Important AI model launch",
+            "summary": "A relevant announcement.",
+            "url": "https://example.com/news",
+        }))
+    finally:
+        ai_curator.get_client = old_get_client
+        ai_curator.AI_CURATION_MIN_INTERVAL_SECONDS = old_interval
+        if had_legacy_flag:
+            ai_curator.ENABLE_AI_CURATION = old_legacy_flag
+        else:
+            delattr(ai_curator, "ENABLE_AI_CURATION")
+
+    assert out["keep"] is True
+    assert out["score"] == 88
 
 
 if __name__ == "__main__":

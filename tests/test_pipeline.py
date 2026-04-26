@@ -19,7 +19,16 @@ if os.path.exists(os.environ["STATE_DB_PATH"]):
 storage.init()
 
 import bot  # noqa: E402
-from bot import _apply_ai_curation, _prefilter, _semantic_group, _sort_for_digest  # noqa: E402
+from bot import (  # noqa: E402
+    _apply_ai_curation,
+    _effective_ai_curation_min_score,
+    _format_source_list,
+    _prefilter,
+    _resolve_source_name,
+    _semantic_group,
+    _setting_bool,
+    _sort_for_digest,
+)
 
 
 def _item(title: str, url: str, source: str = "TestSrc", lang: str = "en") -> dict:
@@ -62,6 +71,32 @@ def test_prefilter_drops_global_muted_source():
     sources = [i["source"] for i in out]
     assert "GlobalBanned" not in sources
     assert "OK" in sources
+
+
+def test_resolve_source_name_rejects_unknown_and_normalizes_case():
+    assert _resolve_source_name("openai") == "OpenAI"
+    assert _resolve_source_name("Not A Real Source") is None
+
+
+def test_format_source_list_escapes_markdown():
+    out = _format_source_list(["Bad_Source*"])
+    assert "Bad\\_Source\\*" in out
+
+
+def test_setting_bool_uses_default_for_invalid_values():
+    assert _setting_bool("true", False) is True
+    assert _setting_bool("off", True) is False
+    assert _setting_bool("maybe", True) is True
+
+
+def test_effective_curation_score_clamps_env_default():
+    old_score = bot.AI_CURATION_MIN_SCORE
+    try:
+        bot.AI_CURATION_MIN_SCORE = 999
+        storage.delete_setting(bot.SETTING_AI_CURATION_MIN_SCORE)
+        assert _effective_ai_curation_min_score() == 100
+    finally:
+        bot.AI_CURATION_MIN_SCORE = old_score
 
 
 def test_semantic_group_merges_duplicates_intra_cycle():
